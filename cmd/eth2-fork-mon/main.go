@@ -26,6 +26,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	err = configFile.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	forkMonitor := monitor.FromConfig(config)
 
