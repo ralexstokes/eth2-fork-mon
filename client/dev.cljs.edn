@@ -1,0 +1,3 @@
+^{:watch-dirs ["src"]
+  :css-dirs ["resources"]}
+{:main com.github.ralexstokes.eth2-fork-mon}
