@@ -171,6 +171,10 @@ func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 			Root:    node.latestHead.root,
 		})
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	enc := json.NewEncoder(w)
 	err := enc.Encode(resp)
 	if err != nil {
@@ -178,10 +182,12 @@ func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 }
 
 func (m *Monitor) sendSpec(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	enc := json.NewEncoder(w)
 	err := enc.Encode(m.config.Eth2)
 	if err != nil {
@@ -189,7 +195,6 @@ func (m *Monitor) sendSpec(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 }
 
 func (m *Monitor) serveAPI() {
