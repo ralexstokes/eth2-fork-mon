@@ -1,10 +1,13 @@
 package monitor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -12,6 +15,7 @@ import (
 const clientVersionPath = "/eth/v1/node/version"
 const nodeIdentityPath = "/eth/v1/node/identity"
 const headHeaderPath = "/eth/v1/beacon/headers/head"
+const headsPath = "/eth/v1/debug/beacon/heads"
 const pollingDuration = 1 * time.Second
 
 type HeadRef struct {
@@ -21,6 +25,16 @@ type HeadRef struct {
 
 func (h HeadRef) String() string {
 	return fmt.Sprintf("(%s, %s)", h.slot, h.root)
+}
+
+// Return some descriptor unique to the peer.
+// NOTE we do not want to expose peer ID to the client for security reasons
+// so hide it behind a hash.
+func idHashOf(peerID string) string {
+	h := sha256.New()
+	h.Write([]byte(peerID))
+	digest := h.Sum(nil)
+	return hex.EncodeToString(digest)[:8]
 }
 
 func nodeAtEndpoint(endpoint string) (*Node, error) {
@@ -54,7 +68,7 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 	}
 	inner = identityData["data"].(map[string]interface{})
 	peerID := inner["peer_id"].(string)
-	n.peerID = peerID
+	n.id = idHashOf(peerID)
 
 	// load current head
 	err = n.doFetchLatestHead()
@@ -62,10 +76,11 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 }
 
 type Node struct {
-	peerID     string
+	id         string // hash of peer id
 	endpoint   string
 	version    string
 	latestHead HeadRef
+	knownHeads []HeadRef
 }
 
 func (n *Node) String() string {
@@ -110,10 +125,49 @@ func (n *Node) doFetchLatestHead() error {
 	return nil
 }
 
+func (n *Node) fetchLatestHeads(wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	err := n.doFetchLatestHeads()
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+func (n *Node) doFetchLatestHeads() error {
+	url := n.endpoint + headsPath
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	headsResp := make(map[string]interface{})
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&headsResp)
+	if err != nil {
+		return err
+	}
+
+	headsData := headsResp["data"].([]interface{})
+
+	var heads []HeadRef
+	for _, headData := range headsData {
+		headData := headData.(map[string]interface{})
+		slot := headData["slot"].(string)
+		root := headData["root"].(string)
+		heads = append(heads, HeadRef{slot, root})
+	}
+
+	n.knownHeads = heads
+
+	return nil
+}
+
 type Monitor struct {
-	config *Config
-	nodes  []*Node
-	errc   chan error
+	config         *Config
+	nodes          []*Node
+	knownHeadCount int
+	errc           chan error
 }
 
 func (m *Monitor) fetchHeads() error {
@@ -146,41 +200,73 @@ func (m *Monitor) startHeadMonitor() {
 	}
 }
 
-// func (m *Monitor) startTipMonitor() {
-// 	// monitor all tips
-// 	// every so often, get all _heads_, collate into batch list
-// 	// of (slot, root)
-// 	// dedupe, provide upon request
-// 	// render list
-// }
+func (m *Monitor) buildBlockTree() {
+	// slot -> set[root]
+	allHeads := make(map[int64]map[string]struct{})
+	earliestSlot := ^int64(0)
+	lastSlot := int64(-1)
 
-type nodeResp struct {
-	ID      string `json:"id"`
-	Version string `json:"version"`
-	Slot    string `json:"slot"`
-	Root    string `json:"root"`
-}
-
-func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
-	var resp []nodeResp
 	for _, node := range m.nodes {
-		resp = append(resp, nodeResp{
-			ID:      node.peerID,
-			Version: node.version,
-			Slot:    node.latestHead.slot,
-			Root:    node.latestHead.root,
-		})
+		for _, head := range node.knownHeads {
+			slotAsSomeInt, _ := strconv.Atoi(head.slot)
+			slotAsInt := int64(slotAsSomeInt)
+			if slotAsInt < earliestSlot {
+				earliestSlot = slotAsInt
+			}
+
+			if slotAsInt > lastSlot {
+				lastSlot = slotAsInt
+			}
+			headsAtSlot, ok := allHeads[slotAsInt]
+			if !ok {
+				headsAtSlot = make(map[string]struct{})
+			}
+			headsAtSlot[head.root] = struct{}{}
+			allHeads[slotAsInt] = headsAtSlot
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	count := 0
+	for i := earliestSlot; i <= lastSlot; i++ {
+		roots, ok := allHeads[i]
+		if !ok {
+			continue
+		}
+		count += len(roots)
+	}
+	m.knownHeadCount = count
+}
 
-	enc := json.NewEncoder(w)
-	err := enc.Encode(resp)
+func (m *Monitor) fetchLatestBlockTree() error {
+	var wg sync.WaitGroup
+
+	for _, node := range m.nodes {
+		wg.Add(1)
+		go node.fetchLatestHeads(&wg)
+	}
+
+	wg.Wait()
+
+	m.buildBlockTree()
+
+	return nil
+}
+
+func (m *Monitor) startBlockTreeMonitor() {
+	err := m.fetchLatestBlockTree()
 	if err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		m.errc <- err
 		return
+	}
+
+	for {
+		time.Sleep(pollingDuration)
+
+		err := m.fetchLatestBlockTree()
+		if err != nil {
+			m.errc <- err
+			return
+		}
 	}
 }
 
@@ -197,10 +283,64 @@ func (m *Monitor) sendSpec(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *Monitor) serveAPI() {
-	http.HandleFunc("/heads", m.sendHeads)
+type nodeResp struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	Slot    string `json:"slot"`
+	Root    string `json:"root"`
+}
 
+func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
+	var resp []nodeResp
+	for _, node := range m.nodes {
+		resp = append(resp, nodeResp{
+			ID:      node.id,
+			Version: node.version,
+			Slot:    node.latestHead.slot,
+			Root:    node.latestHead.root,
+		})
+	}
+
+	resp = append(resp, nodeResp{
+		ID:      "0xabc",
+		Version: resp[len(resp)-1].Version,
+		Slot:    "550334",
+		Root:    "0x015919653fb6924f520509fbfda8b54c7b9f5808f39ddfc2c5d560bea416f394",
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	enc := json.NewEncoder(w)
+	err := enc.Encode(resp)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+type blockTreeResp struct {
+	Heads []HeadRef `json:"heads"`
+}
+
+func (m *Monitor) sendBlockTree(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	enc := json.NewEncoder(w)
+	err := enc.Encode(map[string]int{"head_count": m.knownHeadCount})
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (m *Monitor) serveAPI() {
 	http.HandleFunc("/spec", m.sendSpec)
+	http.HandleFunc("/heads", m.sendHeads)
+	http.HandleFunc("/block-tree", m.sendBlockTree)
 
 	log.Println("listening on port 8080...")
 	m.errc <- http.ListenAndServe(":8080", nil)
@@ -208,7 +348,7 @@ func (m *Monitor) serveAPI() {
 
 func (m *Monitor) Serve() error {
 	go m.startHeadMonitor()
-	// go m.startTipMonitor()
+	go m.startBlockTreeMonitor()
 	go m.serveAPI()
 	return <-m.errc
 }
