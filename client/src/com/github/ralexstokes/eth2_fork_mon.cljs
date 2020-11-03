@@ -11,7 +11,7 @@
 
 (def debug-mode? false)
 
-(def dev-mode? true)
+(def dev-mode? false)
 
 (defn url-for [path]
   (if dev-mode?
