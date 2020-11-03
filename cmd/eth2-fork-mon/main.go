@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-var configFile = flag.String("config-file", "", "path to configuration")
+var configFile = flag.String("config-file", "/config.yaml", "path to configuration")
 
 func main() {
 	flag.Parse()

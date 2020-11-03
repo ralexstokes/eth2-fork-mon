@@ -8,15 +8,20 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/emicklei/dot"
 )
 
 const clientVersionPath = "/eth/v1/node/version"
 const nodeIdentityPath = "/eth/v1/node/identity"
 const headHeaderPath = "/eth/v1/beacon/headers/head"
 const headsPath = "/eth/v1/debug/beacon/heads"
+const protoArrayPath = "/lighthouse/proto_array"
 const pollingDuration = 1 * time.Second
+const slotDuration = 12 * time.Second
 
 type HeadRef struct {
 	slot string
@@ -163,27 +168,76 @@ func (n *Node) doFetchLatestHeads() error {
 	return nil
 }
 
+type ProtoArrayResp struct {
+	Data struct {
+		Nodes []ProtoArrayNode `json:"nodes"`
+	} `json:"data"`
+}
+
+type ProtoArrayNode struct {
+	Slot           string   `json:"slot"`
+	Root           string   `json:"root"`
+	ParentIndex    *float64 `json:"parent"`
+	Weight         float64  `json:"weight"`
+	BestDescendant float64  `json:"best_descendant"`
+}
+
+func (n *Node) fetchProtoArray() ([]ProtoArrayNode, error) {
+	url := n.endpoint + protoArrayPath
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	protoArrayResp := ProtoArrayResp{}
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&protoArrayResp)
+	return protoArrayResp.Data.Nodes, err
+}
+
 type Monitor struct {
-	config         *Config
-	nodes          []*Node
+	config *Config
+	nodes  []*Node
+
 	knownHeadCount int
-	errc           chan error
+
+	forkChoiceSummary         ForkChoiceNode
+	currentForkChoiceProvider *Node
+	forkchoiceLock            sync.Mutex
+
+	errc chan error
 }
 
 func (m *Monitor) fetchHeads() error {
 	var wg sync.WaitGroup
 
+	lastBlockTreeHead := HeadRef{}
 	for _, node := range m.nodes {
 		wg.Add(1)
+		if node == m.currentForkChoiceProvider {
+			lastBlockTreeHead = node.latestHead
+		}
 		go node.fetchLatestHead(&wg)
 	}
 
 	wg.Wait()
+
+	if m.currentForkChoiceProvider.latestHead != lastBlockTreeHead {
+		err := m.buildLatestForkChoiceSummary()
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (m *Monitor) startHeadMonitor() {
-	err := m.fetchHeads()
+	err := m.buildLatestForkChoiceSummary()
+	if err != nil {
+		return
+	}
+
+	err = m.fetchHeads()
 	if err != nil {
 		m.errc <- err
 		return
@@ -270,6 +324,59 @@ func (m *Monitor) startBlockTreeMonitor() {
 	}
 }
 
+func (m *Monitor) buildLatestForkChoiceSummary() error {
+	// log.Println("building fork choice summary")
+	// keep trying until proto array response is synchonrized w/ node's head
+	protoArray, err := m.currentForkChoiceProvider.fetchProtoArray()
+	if err != nil {
+		return err
+	}
+
+	// skip finding head w/ highest weight in our (possibly stale) view
+	// by querying the node's head and ensuring it is consistent w/ the proto array response
+	// err = m.currentForkChoiceProvider.doFetchLatestHead()
+	// if err != nil {
+	// 	return err
+	// }
+	// head := m.currentForkChoiceProvider.latestHead
+
+	root := protoArray[0]
+	headIndex := root.BestDescendant
+	// headNode := protoArray[int(headIndex)]
+	// if head.root != headNode.Root {
+	// 	// view is not synchronized, let's just try again
+	// 	// this should be a very temporary issue based on internals of the `currentForkChoiceProvider`
+	// 	continue
+	// }
+
+	summary := computeSummary(protoArray, headIndex)
+
+	// log.Println("updated with head", headNode.Root)
+	m.forkchoiceLock.Lock()
+	defer m.forkchoiceLock.Unlock()
+
+	m.forkChoiceSummary = summary
+	return nil
+}
+
+func (m *Monitor) startProtoArrayMonitor() {
+	err := m.buildLatestForkChoiceSummary()
+	if err != nil {
+		m.errc <- err
+		return
+	}
+
+	for {
+		time.Sleep(slotDuration)
+
+		err := m.buildLatestForkChoiceSummary()
+		if err != nil {
+			m.errc <- err
+			return
+		}
+	}
+}
+
 func (m *Monitor) sendSpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -290,6 +397,21 @@ type nodeResp struct {
 	Root    string `json:"root"`
 }
 
+var sampleResponses = []nodeResp{
+	{
+		ID:      "0xabc",
+		Version: "Prysm/vXXX-yyyyyy/x86_64-linux-MOCK",
+	},
+	{
+		ID:      "0xdef",
+		Version: "Teku/vXXX-yyyyyy/x86_64-linux-MOCK",
+	},
+	{
+		ID:      "0x123",
+		Version: "Nimbus/vXXX-yyyyyy/x86_64-linux-MOCK",
+	},
+}
+
 func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 	var resp []nodeResp
 	for _, node := range m.nodes {
@@ -301,12 +423,19 @@ func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// add mock responses
 	resp = append(resp, nodeResp{
 		ID:      "0xabc",
-		Version: resp[len(resp)-1].Version,
+		Version: resp[len(resp)-1].Version + "-MOCK",
 		Slot:    "550334",
 		Root:    "0x015919653fb6924f520509fbfda8b54c7b9f5808f39ddfc2c5d560bea416f394",
 	})
+	for _, mockNode := range sampleResponses {
+		mockNode.Slot = resp[0].Slot
+		mockNode.Root = resp[0].Root
+
+		resp = append(resp, mockNode)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -337,32 +466,182 @@ func (m *Monitor) sendBlockTree(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type ForkChoiceNode struct {
+	Children    []ForkChoiceNode `json:"children"`
+	Slot        string           `json:"slot"`
+	Root        string           `json:"root"`
+	Weight      float64          `json:"weight"`
+	IsCanonical bool             `json:"is_canonical"`
+
+	CountCollapsedBlocks int `json:"count_collapsed_blocks,omitempty"`
+
+	countOfSubTree int
+}
+
+func humanizeRoot(root string) string {
+	if len(root) != 66 { // 32 hex + "0x"
+		return root
+	}
+	return fmt.Sprintf("%s..%s", root[2:6], root[len(root)-4:])
+}
+
+func (node *ForkChoiceNode) visit(g *dot.Graph, parentNode *dot.Node) {
+	n := g.Node(fmt.Sprintf("(%s,%s) (%d)", node.Slot, humanizeRoot(node.Root), node.CountCollapsedBlocks))
+	if node.IsCanonical {
+		n.Attr("fillcolor", "#fdfd96")
+		n.Attr("style", "filled")
+	}
+	if parentNode != nil {
+		n.Edge(*parentNode)
+	}
+	for _, child := range node.Children {
+		child.visit(g, &n)
+	}
+}
+
+func countTree(node *ForkChoiceNode) int {
+	if node.countOfSubTree != 0 {
+		return node.countOfSubTree
+	}
+
+	for _, child := range node.Children {
+		node.countOfSubTree += countTree(&child)
+	}
+
+	node.countOfSubTree += len(node.Children)
+	return node.countOfSubTree
+}
+
+const epochsToSend = 4
+
+func computeCurrentSlot(genesisTime int, secondsPerSlot int) int {
+	t := time.Now().Unix()
+	secondsSinceGenesis := t - int64(genesisTime)
+	return int(secondsSinceGenesis / int64(secondsPerSlot))
+}
+
+// Return the block in the block tree represented by `node`
+// such that the count of all nodes in the resulting tree
+// are near `forkChoiceNodePreferredCount`
+func pruneForBrowser(node ForkChoiceNode, genesisTime int, slotsPerEpoch int, secondsPerSlot int) ForkChoiceNode {
+	currentSlot := computeCurrentSlot(genesisTime, secondsPerSlot)
+	currentEpoch := int(currentSlot / slotsPerEpoch)
+	targetEpoch := currentEpoch - epochsToSend
+	if targetEpoch < 0 {
+		targetEpoch = 0
+	}
+
+	targetSlot := targetEpoch * slotsPerEpoch
+	slot, err := strconv.Atoi(node.Slot)
+	if err != nil {
+		return node
+	}
+	for slot < targetSlot {
+		for _, child := range node.Children {
+			if child.IsCanonical {
+				node = child
+				slot, err = strconv.Atoi(node.Slot)
+				if err != nil {
+					return node
+				}
+				break
+			}
+		}
+	}
+
+	return node
+}
+
+func (m *Monitor) sendForkChoice(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// log.Println("serving request for fork choice")
+
+	m.forkchoiceLock.Lock()
+	forkChoiceSummary := m.forkChoiceSummary
+	m.forkchoiceLock.Unlock()
+	forkChoiceForBrowser := pruneForBrowser(forkChoiceSummary, m.config.Eth2.GenesisTime, m.config.Eth2.SlotsPerEpoch, m.config.Eth2.SecondsPerSlot)
+
+	enc := json.NewEncoder(w)
+	err := enc.Encode(forkChoiceForBrowser)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	// log.Println("done serving request for fork choice")
+}
+
+func buildDOT(root ForkChoiceNode) *dot.Graph {
+	g := dot.NewGraph(dot.Directed)
+
+	root.visit(g, nil)
+
+	return g
+}
+
+func (m *Monitor) sendForkChoiceAsDOT(w http.ResponseWriter, r *http.Request) {
+	m.forkchoiceLock.Lock()
+	defer m.forkchoiceLock.Unlock()
+
+	g := buildDOT(m.forkChoiceSummary)
+	g.Write(w)
+}
+
 func (m *Monitor) serveAPI() {
 	http.HandleFunc("/spec", m.sendSpec)
 	http.HandleFunc("/heads", m.sendHeads)
 	http.HandleFunc("/block-tree", m.sendBlockTree)
+	http.HandleFunc("/fork-choice", m.sendForkChoice)
+	http.HandleFunc("/fork-choice-dot", m.sendForkChoiceAsDOT)
+	clientServer := http.FileServer(http.Dir("./public"))
+	http.Handle("/", clientServer)
 
 	log.Println("listening on port 8080...")
 	m.errc <- http.ListenAndServe(":8080", nil)
 }
 
+func waitUntilNextSlot(genesisTime int, secondsPerSlot int) {
+	now := time.Now().Unix()
+	currentSlot := int((int(now) - genesisTime) / secondsPerSlot)
+	nextSlot := currentSlot + 1
+	nextSlotInSeconds := nextSlot * secondsPerSlot
+	nextSlotStart := nextSlotInSeconds + genesisTime
+
+	duration := nextSlotStart - int(time.Now().Unix())
+
+	time.Sleep(time.Duration(duration) * time.Second)
+}
+
 func (m *Monitor) Serve() error {
+	log.Println("synchronizing to next slot")
+	waitUntilNextSlot(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot)
+	log.Println("aligned to slot, continuting")
 	go m.startHeadMonitor()
-	go m.startBlockTreeMonitor()
+	// go m.startBlockTreeMonitor()
+	// go m.startProtoArrayMonitor()
 	go m.serveAPI()
 	return <-m.errc
 }
 
 func FromConfig(config *Config) *Monitor {
 	var nodes []*Node
+	var forkChoiceProvider *Node
 	for _, endpoint := range config.Endpoints {
 		node, err := nodeAtEndpoint(endpoint)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
+		if strings.Contains(node.version, "Lighthouse") {
+			forkChoiceProvider = node
+		}
 		nodes = append(nodes, node)
 	}
 
-	return &Monitor{config: config, nodes: nodes, errc: make(chan error)}
+	if forkChoiceProvider == nil {
+		log.Println("warn: no lighthouse node provided so fork choice endpoint will be empty (requires lighthouse protoarray)")
+	}
+
+	return &Monitor{config: config, nodes: nodes, currentForkChoiceProvider: forkChoiceProvider, errc: make(chan error)}
 }
