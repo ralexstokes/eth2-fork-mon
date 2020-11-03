@@ -1,14 +1,26 @@
 (ns ^:figwheel-hooks com.github.ralexstokes.eth2-fork-mon
   (:require-macros [cljs.core.async.macros :refer [go]])
   (:require
+   [cljsjs.d3]
    [clojure.string :as str]
    [cljs.pprint :as pprint]
    [reagent.core :as r]
    [reagent.dom :as r.dom]
    [cljs-http.client :as http]
-   [cljs.core.async :refer [<!]]))
+   [cljs.core.async :refer [<! chan close!]]))
 
 (def debug-mode? false)
+
+(def dev-mode? true)
+
+(defn url-for [path]
+  (if dev-mode?
+    (str "http://localhost:8080/" path)
+    (str "/" path)))
+
+(defn put! [& objs]
+  (doseq [obj objs]
+    (.log js/console obj)))
 
 (defn- get-time []
   (.now js/Date))
@@ -42,10 +54,9 @@
 
 (defn clock-view []
   (when-let [eth2-spec (:eth2-spec @state)]
-    (let [{:keys [seconds_per_slot slots_per_epoch]} eth2-spec
-          seconds-per-slot seconds_per_slot
+    (let [{:keys [slots_per_epoch]} eth2-spec
           slots-per-epoch slots_per_epoch
-          {:keys [slot epoch slot-in-epoch seconds-into-slot progress-into-slot]} (:slot-clock @state)]
+          {:keys [slot epoch slot-in-epoch progress-into-slot]} (:slot-clock @state)]
       [:div.card
        [:div.card-header
         "Clock"]
@@ -84,8 +95,8 @@
           (map-indexed peer-view peers)]]]]]]))
 
 (defn humanize-hex [hex-str]
-  (str (subs hex-str 0 6)
-       "..."
+  (str (subs hex-str 2 6)
+       ".."
        (subs hex-str (- (count hex-str) 4))))
 
 (defn head-view [index {:keys [name slot root is-majority?]}]
@@ -111,14 +122,21 @@
        [:tbody
         (map-indexed head-view heads)]]]]))
 
+(defn count-heads [root]
+  (.-length (.leaves root)))
+
 (defn tree-view []
   [:div.card
    [:div.card-header
-    "Block tree"]
+    "Block tree over last 4 epochs"]
    [:div.card-body
-    [:div#block-tree-viewer
+    [:div#head-count-viewer
+     (when-let [head-count (:head-count @state)]
+       [:p
+      "Count of heads in beacon node's view: " head-count])
      [:p
-      "Count of heads: " (get @state :head-count 0)]]]])
+      "Canonical head root: " (get @state :majority-root "")]
+     [:div#fork-choice.svg-container]]]])
 
 (defn debug-view []
   [:div.row.debug
@@ -135,14 +153,14 @@
 
 (defn app []
   [:div.container-fluid
-   [:navbar.navbar.navbar-expand-sm.navbar-light.bg-light
+   [:div.navbar.navbar-expand-sm.navbar-light.bg-light
     [:div.navbar-brand "eth2 fork mon"]
     [:nav
      [:div.nav.nav-tabs
       [:a.nav-link.active {:data-toggle :tab
                            :href "#nav-tip-monitor"} "chain monitor"]
       [:a.nav-link {:data-toggle :tab
-                    :href "#nav-heads-monitor"} "block tree"]]]]
+                    :href "#nav-block-tree"} "block tree"]]]]
    [:div.tab-content
     (container-row
      (clock-view))
@@ -151,7 +169,7 @@
       (nodes-view))
      (container-row
       (compare-heads-view))]
-    [:div#nav-heads-monitor.tab-pane.fade.show
+    [:div#nav-block-tree.tab-pane.fade.show
      (container-row
       (tree-view))]
     (when debug-mode?
@@ -163,10 +181,8 @@
 
 (defn ^:after-load re-render [] (mount))
 
-(defn load-spec-from-server []
-  (go (let [response (<! (http/get "http://localhost:8080/spec"
-                                   {:with-credentials? false}))]
-        (swap! state assoc :eth2-spec (:body response)))))
+(defn fetch-spec-from-server []
+  (http/get (url-for "spec") {:with-credentials? false}))
 
 (defn process-heads-response [heads]
   (->> heads
@@ -186,49 +202,220 @@
 (defn attach-name [peer]
   (assoc peer :name (name-from (:version peer))))
 
+(def polling-frequency 700) ;; ms
+(def slot-clock-refresh-frequency 100) ;; ms
+
+(defn fetch-head-count []
+  (go (let [response (<! (http/get (url-for "block-tree")
+                                   {:with-credentials? false}))
+            response-body (:body response)
+            head-count (:head_count response-body)]
+        (swap! state assoc :head-count head-count))))
+
+(defn empty-svg! [svg]
+  (.remove svg))
+
+(defn node->label [d]
+  (let [data (.-data d)
+        root (-> data .-root humanize-hex)]
+    (if-let [parent (.-parent d)]
+      (if-let [siblings (.-children parent)]
+        (if (> (.-length siblings) 1)
+            (let [weight (.-weight data)]
+              (str/join ", " [root (str (quot weight (js/Math.pow 10 9)) " ETH")]))
+          root)
+        root)
+    root)))
+
+(defn canonical-node? [d]
+  (-> d
+      .-data
+      .-is_canonical))
+
+(defn slot-guide->label [highest-slot offset]
+  (let [slot (- highest-slot offset)]
+    (if (zero? (mod slot 32))
+      (str slot " (epoch " (quot slot 32) ")")
+      slot)))
+
+(defn node->y-offset [slot-offset dy node]
+  (let [data (.-data node)
+        slot (.-slot data)
+        offset (- slot slot-offset)]
+    (+ 0 (* dy offset) (/ dy 2))))
+
+(defn compute-fill [highest-slot offset]
+  (let [slot (- highest-slot offset)]
+    (if (zero? (mod slot 32))
+      "#e9f5ec"
+      (if (even? slot)
+        "#e9ecf5"
+        "#fff"))))
+
+(defn compute-node-fill [d]
+  (if (canonical-node? d)
+    "#eec643"
+    "#555"))
+
+(defn compute-node-stroke [d]
+  (if-let [_ (.-children d)]
+    ""
+    (if (canonical-node? d)
+      "#d5ad2a"
+      "")))
+
+(defn draw-tree! [root width]
+  (let [leaves (.leaves root)
+        highest-slot (js/parseFloat (apply max (map #(-> % .-data .-slot) leaves)))
+        lowest-slot (js/parseFloat (-> root .-data .-slot))
+        slot-count (- highest-slot lowest-slot)
+        dy (.-dy root)
+        height (* dy (inc slot-count))
+        svg (-> (js/d3.selectAll "#fork-choice")
+                (.append "svg")
+                (.attr "viewBox" (array 0 0 width height))
+                (.attr "preserveAspectRatio" "xMinYMin meet")
+                (.attr "class" "svg-content-responsive"))
+        background (-> svg
+                       (.append "g")
+                       (.attr "font-size" 10)
+                       )
+        slot-rects (-> background
+                       (.append "g")
+                       (.selectAll "g")
+                       (.data (clj->js (into [] (range (inc slot-count)))))
+                       (.join "g")
+                       (.attr "transform" #(str "translate(0 " (* dy %)")")))
+        _ (-> slot-rects
+                       (.append "rect")
+                       (.attr "fill" #(compute-fill highest-slot %))
+                       (.attr "x" 0)
+                       (.attr "y" 0)
+                       (.attr "width" "100%")
+                       (.attr "height" dy))
+        _ (-> slot-rects 
+                       (.append "text")
+                       (.attr "text-anchor" "start")
+                       (.attr "y" (* dy 0.5))
+                       (.attr "x" 5)
+                       (.attr "fill" "#6c757d")
+                       (.text #(slot-guide->label highest-slot %))
+                       )
+        g (-> svg
+              (.append "g")
+              (.attr "transform"
+                     (str "translate(" (/ width 2) "," height ") rotate(180)")))
+        links  (-> g
+                   (.append "g")
+                   (.attr "fill" "none")
+                   (.attr "stroke"  "#555")
+                   (.attr "stroke-opacity" 0.4)
+                   (.attr "stroke-width" 1.5)
+                   (.selectAll "path")
+                   (.data (.links root))
+                   (.join "path")
+                   (.attr "d" (-> (js/d3.linkVertical)
+                                  (.x #(.-x %))
+                                  (.y #(node->y-offset lowest-slot dy %))
+                                  )))
+
+        nodes   (-> g
+                    (.append "g")
+                    (.selectAll "g")
+                    (.data (.descendants root))
+                    (.join "g")
+                    (.attr "transform" #(str "translate(" (.-x %) "," (node->y-offset lowest-slot dy %)  ")")))
+        _ (-> nodes
+                      (.append "circle")
+                      (.attr "fill" compute-node-fill)
+                      (.attr "stroke" compute-node-stroke)
+                      (.attr "stroke-width" 3)
+                      (.attr "r" (* dy 0.2)))
+        _ (-> nodes
+                   (.append "text")
+                   (.attr "dx" "1em")
+                   (.attr "transform" "rotate(180)")
+                   (.attr "text-anchor" "start")
+                   (.text node->label)
+                   )]))
+
+(defn render-fork-choice! [root]
+  (let [width (* (.-innerWidth js/window) (/ 9 12))
+        height (.-innerHeight js/window)
+        head-count (.-length (.leaves root))
+        dy (* height 0.05)
+        dx (/ width (+ 4 head-count))
+        _ (aset root "dx" dx)
+        _ (aset root "dy" dy)
+        mk-tree (-> (js/d3.tree)
+                    (.nodeSize (array dx dy)))
+        root (mk-tree root)
+        svg (js/d3.select "#fork-choice svg")]
+    (empty-svg! svg)
+    (draw-tree! root width)))
+
+
+(defn start-polling-for-head-count []
+  (fetch-head-count)
+  (let [head-count-task (js/setInterval fetch-head-count polling-frequency)]
+    (swap! state assoc :head-count-task head-count-task)))
+
+(defn refresh-fork-choice []
+  (go (let [response (<! (http/get (url-for "fork-choice")
+                                   {:with-credentials? false}))
+            fork-choice (js/d3.hierarchy (clj->js (:body response)))]
+        (render-fork-choice! fork-choice))))
+
+(defn block-for [ms-delay]
+  (let [c (chan)]
+    (js/setTimeout (fn [] (close! c)) ms-delay)
+    c))
+
+(defn fetch-block-tree-if-new-head [old new]
+  (when (not= old new)
+    (refresh-fork-choice)))
+
 (defn fetch-heads []
-  (go (let [response (<! (http/get "http://localhost:8080/heads"
+  (go (let [response (<! (http/get (url-for "heads")
                                    {:with-credentials? false}))
             heads (:body response)
-            [majority-root _] (process-heads-response heads)]
+            [majority-root _] (process-heads-response heads)
+            old-root (get @state :majority-root "")]
+        (go (let [blocking-task (block-for 3000)]
+              (<! blocking-task)
+              (fetch-block-tree-if-new-head old-root majority-root)))
+        (swap! state assoc :majority-root majority-root)
         (swap! state assoc :heads (->> heads
                                        (map (partial attach-majority majority-root))
                                        (map attach-name))))))
-
-(def polling-frequency 700) ;; ms
-(def slot-clock-refresh-frequency 100) ;; ms
 
 (defn start-polling-for-heads []
   (fetch-heads)
   (let [polling-task (js/setInterval fetch-heads polling-frequency)]
     (swap! state assoc :polling-task polling-task)))
 
-(defn fetch-block-tree []
-  (go (let [response (<! (http/get "http://localhost:8080/block-tree"
-                                   {:with-credentials? false}))
-            response-body (:body response)
-            head-count (:head_count response-body)]
-        (swap! state assoc :head-count head-count))))
-
-(defn start-polling-for-block-tree []
-  (fetch-block-tree)
-  (let [block-tree-task (js/setInterval fetch-block-tree polling-frequency)]
-    (swap! state assoc :block-tree-task block-tree-task)))
 
 (defn update-slot-clock []
-  (when-let [eth2-spec (:eth2-spec @state)]
-    (let [genesis-time (:genesis_time eth2-spec)
-          seconds-per-slot (:seconds_per_slot eth2-spec)
-          slots-per-epoch (:slots_per_epoch eth2-spec)]
-      (swap! state assoc :slot-clock (calculate-eth2-time genesis-time seconds-per-slot slots-per-epoch)))))
+  (let [eth2-spec (:eth2-spec @state)
+        genesis-time (:genesis_time eth2-spec)
+        seconds-per-slot (:seconds_per_slot eth2-spec)
+        slots-per-epoch (:slots_per_epoch eth2-spec)]
+    (swap! state assoc :slot-clock (calculate-eth2-time genesis-time seconds-per-slot slots-per-epoch))))
 
 (defn start-slot-clock []
   (let [timer-task (js/setInterval update-slot-clock slot-clock-refresh-frequency)]
     (swap! state assoc :timer-task timer-task)))
 
-(defonce init (do
-                (load-spec-from-server)
-                (start-slot-clock)
-                (start-polling-for-heads)
-                (start-polling-for-block-tree)
-                (mount)))
+(defn start-viz []
+  (go (let [spec-response (fetch-spec-from-server)
+            spec (:body (<! spec-response))]
+        (swap! state assoc :eth2-spec spec)
+        (mount)
+        (start-slot-clock)
+        (start-polling-for-heads)
+        ;; (start-polling-for-head-count)
+        (refresh-fork-choice)
+        )))
+
+(defonce init
+  (start-viz))
