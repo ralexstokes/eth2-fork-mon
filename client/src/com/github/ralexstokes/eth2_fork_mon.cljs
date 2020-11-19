@@ -11,13 +11,6 @@
 
 (def debug-mode? false)
 
-(def dev-mode? false)
-
-(defn url-for [path]
-  (if dev-mode?
-    (str "http://localhost:8080/" path)
-    (str "/" path)))
-
 (defn put! [& objs]
   (doseq [obj objs]
     (.log js/console obj)))
@@ -44,13 +37,20 @@
      :progress-into-slot (* 100 (/ (- current-time (* slot-start-in-seconds 1000)) (* seconds-per-slot 1000)))
      :seconds-into-slot (- time-in-secs slot-start-in-seconds)}))
 
-(defonce state (r/atom {}))
+(defonce state (r/atom {:network ""}))
 
 ;; debug utility
 (defn render-edn [data]
   [:pre
    (with-out-str
      (pprint/pprint data))])
+
+(defn round-to-extremes [x]
+  (let [margin 4]
+    (cond
+      (< x margin) 0
+      (> x (- 100 margin)) 100
+      :else x)))
 
 (defn clock-view []
   (when-let [eth2-spec (:eth2-spec @state)]
@@ -67,7 +67,7 @@
         [:div.progress
          [:div.progress-bar
           {:style
-           {:width (str progress-into-slot "%")}}]]]])))
+           {:width (str (round-to-extremes progress-into-slot) "%")}}]]]])))
 
 (defn peer-view [index {:keys [name version]}]
   [:tr {:key index}
@@ -99,13 +99,24 @@
        ".."
        (subs hex-str (- (count hex-str) 4))))
 
+(defn network->beaconchain-prefix [network]
+  (case network
+    "mainnet" ""
+    (str network ".")))
+
 (defn head-view [index {:keys [name slot root is-majority?]}]
   [:tr {:class (if is-majority? :table-success :table-danger)
         :key index}
    [:th {:scope :row}
     name]
-   [:td [:a {:href (str "https://beaconcha.in/block/" slot)} slot]]
-   [:td [:a {:href (str "https://beaconcha.in/block/" (subs root 2))} (humanize-hex root)]]])
+   [:td [:a {:href (str "https://"
+                        (network->beaconchain-prefix (:network @state))
+                        "beaconcha.in/block/"
+                        slot)} slot]]
+   [:td [:a {:href (str "https://"
+                        (network->beaconchain-prefix (:network @state))
+                        "beaconcha.in/block/"
+                        (subs root 2))} (humanize-hex root)]]])
 
 (defn compare-heads-view []
   (when-let [heads (:heads @state)]
@@ -136,6 +147,12 @@
       "Count of heads in beacon node's view: " head-count])
      [:p
       "Canonical head root: " (get @state :majority-root "")]
+     [:p
+      [:small
+       "NOTE: nodes are labeled with their block root. Percentages are amounts of stake relative to the justified root."]]
+     [:p
+      [:small
+       "NOTE: visualization may take a slot to synchronize."]]
      [:div#fork-choice.svg-container]]]])
 
 (defn debug-view []
@@ -153,14 +170,17 @@
 
 (defn app []
   [:div.container-fluid
-   [:div.navbar.navbar-expand-sm.navbar-light.bg-light
-    [:div.navbar-brand "eth2 fork mon"]
-    [:nav
-     [:div.nav.nav-tabs
+   [:nav.navbar.navbar-expand-sm.navbar-light.bg-light
+    [:a.navbar-brand {:href "#"} "eth2 fork mon"]
+    [:ul.nav.nav-pills.mr-auto
+     [:li.nav-item
       [:a.nav-link.active {:data-toggle :tab
-                           :href "#nav-tip-monitor"} "chain monitor"]
+                           :href "#nav-tip-monitor"} "chain monitor"]]
+     [:li.nav-item
       [:a.nav-link {:data-toggle :tab
-                    :href "#nav-block-tree"} "block tree"]]]]
+                    :href "#nav-block-tree"} "block tree"]]]
+    [:div.ml-auto
+     [:span.navbar-text (str "network: " (:network @state))]]]
    [:div.tab-content
     (container-row
      (clock-view))
@@ -182,7 +202,7 @@
 (defn ^:after-load re-render [] (mount))
 
 (defn fetch-spec-from-server []
-  (http/get (url-for "spec") {:with-credentials? false}))
+  (http/get "/spec" {:with-credentials? false}))
 
 (defn process-heads-response [heads]
   (->> heads
@@ -197,7 +217,8 @@
 (defn- name-from [version]
   (-> version
       (str/split "/")
-      first))
+      first
+      str/capitalize))
 
 (defn attach-name [peer]
   (assoc peer :name (name-from (:version peer))))
@@ -206,7 +227,7 @@
 (def slot-clock-refresh-frequency 100) ;; ms
 
 (defn fetch-head-count []
-  (go (let [response (<! (http/get (url-for "block-tree")
+  (go (let [response (<! (http/get "/block-tree"
                                    {:with-credentials? false}))
             response-body (:body response)
             head-count (:head_count response-body)]
@@ -215,17 +236,37 @@
 (defn empty-svg! [svg]
   (.remove svg))
 
-(defn node->label [d]
+;; NOTE: this function only labels leaves, the root and fork points with weights
+;; (defn node->label
+;;   "Label nodes with their root. If they are leaves or have direct siblings, add percent weight"
+;;   [total-weight d]
+;;   (let [data (.-data d)
+;;         root (-> data .-root humanize-hex)
+;;         leaf? (= 0 (count (.-children d)))
+;;         suffix (if-let [parent (.-parent d)] ;; add weight to fork points
+;;                  (if-let [siblings (.-children parent)]
+;;                    (if (> (.-length siblings) 1)
+;;                      (.-weight data)
+;;                      "") ;; no siblings
+;;                    "") ;; default
+;;                  (.-weight data)) ;; root of tree
+;;         suffix (if (and leaf?
+;;                         (= "" suffix))
+;;                  (.-weight data)
+;;                  suffix)]
+;;     (if (= suffix "")
+;;       root
+;;       (if (zero? suffix)
+;;         (str root ", 0%")
+;;         (str root ", " (-> (/ suffix total-weight)
+;;                            (* 100)
+;;                            (.toFixed 4)) "%")))))
+
+(defn node->label [total-weight d]
   (let [data (.-data d)
-        root (-> data .-root humanize-hex)]
-    (if-let [parent (.-parent d)]
-      (if-let [siblings (.-children parent)]
-        (if (> (.-length siblings) 1)
-            (let [weight (.-weight data)]
-              (str/join ", " [root (str (quot weight (js/Math.pow 10 9)) " ETH")]))
-          root)
-        root)
-    root)))
+        root (-> data .-root humanize-hex)
+        weight (.-weight data)]
+    (str root ", " (-> (/ weight total-weight) (* 100) (.toFixed 2)) "%")))
 
 (defn canonical-node? [d]
   (-> d
@@ -264,7 +305,22 @@
       "#d5ad2a"
       "")))
 
-(defn draw-tree! [root width]
+(defn network->beaconchain-prefix [network]
+  (case network
+    "mainnet" ""
+    (str network ".")))
+
+(defn node->block-explorer-link [d]
+  (str "https://"
+       (network->beaconchain-prefix (:network @state))
+       "beaconcha.in/block/"
+       (-> d
+           .-data
+           .-root
+           (subs 2))))
+  
+
+(defn draw-tree! [root width total-weight]
   (let [leaves (.leaves root)
         highest-slot (js/parseFloat (apply max (map #(-> % .-data .-slot) leaves)))
         lowest-slot (js/parseFloat (-> root .-data .-slot))
@@ -324,7 +380,9 @@
                     (.selectAll "g")
                     (.data (.descendants root))
                     (.join "g")
-                    (.attr "transform" #(str "translate(" (.-x %) "," (node->y-offset lowest-slot dy %)  ")")))
+                    (.attr "transform" #(str "translate(" (.-x %) "," (node->y-offset lowest-slot dy %)  ")"))
+                    (.append "a")
+                    (.attr "href" node->block-explorer-link))
         _ (-> nodes
                       (.append "circle")
                       (.attr "fill" compute-node-fill)
@@ -336,10 +394,10 @@
                    (.attr "dx" "1em")
                    (.attr "transform" "rotate(180)")
                    (.attr "text-anchor" "start")
-                   (.text node->label)
+                   (.text (partial node->label total-weight))
                    )]))
 
-(defn render-fork-choice! [root]
+(defn render-fork-choice! [root total-weight]
   (let [width (* (.-innerWidth js/window) (/ 9 12))
         height (.-innerHeight js/window)
         head-count (.-length (.leaves root))
@@ -352,7 +410,7 @@
         root (mk-tree root)
         svg (js/d3.select "#fork-choice svg")]
     (empty-svg! svg)
-    (draw-tree! root width)))
+    (draw-tree! root width total-weight)))
 
 
 (defn start-polling-for-head-count []
@@ -361,10 +419,12 @@
     (swap! state assoc :head-count-task head-count-task)))
 
 (defn refresh-fork-choice []
-  (go (let [response (<! (http/get (url-for "fork-choice")
+  (go (let [response (<! (http/get "/fork-choice"
                                    {:with-credentials? false}))
-            fork-choice (js/d3.hierarchy (clj->js (:body response)))]
-        (render-fork-choice! fork-choice))))
+            block-tree (get-in response [:body :block_tree])
+            total-weight (get-in response [:body :total_weight])
+            fork-choice (js/d3.hierarchy (clj->js block-tree))]
+        (render-fork-choice! fork-choice total-weight))))
 
 (defn block-for [ms-delay]
   (let [c (chan)]
@@ -376,7 +436,7 @@
     (refresh-fork-choice)))
 
 (defn fetch-heads []
-  (go (let [response (<! (http/get (url-for "heads")
+  (go (let [response (<! (http/get "heads"
                                    {:with-credentials? false}))
             heads (:body response)
             [majority-root _] (process-heads-response heads)
@@ -410,10 +470,10 @@
   (go (let [spec-response (fetch-spec-from-server)
             spec (:body (<! spec-response))]
         (swap! state assoc :eth2-spec spec)
+        (swap! state assoc :network (:network spec))
         (mount)
         (start-slot-clock)
         (start-polling-for-heads)
-        ;; (start-polling-for-head-count)
         (refresh-fork-choice)
         )))
 

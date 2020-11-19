@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -202,6 +203,7 @@ type Monitor struct {
 	knownHeadCount int
 
 	forkChoiceSummary         ForkChoiceNode
+	forkChoiceTotalWeight     float64
 	currentForkChoiceProvider *Node
 	forkchoiceLock            sync.Mutex
 
@@ -351,11 +353,14 @@ func (m *Monitor) buildLatestForkChoiceSummary() error {
 
 	summary := computeSummary(protoArray, headIndex)
 
+	totalWeight := extractTotalWeight(protoArray)
+
 	// log.Println("updated with head", headNode.Root)
 	m.forkchoiceLock.Lock()
 	defer m.forkchoiceLock.Unlock()
 
 	m.forkChoiceSummary = summary
+	m.forkChoiceTotalWeight = totalWeight
 	return nil
 }
 
@@ -398,18 +403,18 @@ type nodeResp struct {
 }
 
 var sampleResponses = []nodeResp{
-	{
-		ID:      "0xabc",
-		Version: "Prysm/vXXX-yyyyyy/x86_64-linux-MOCK",
-	},
-	{
-		ID:      "0xdef",
-		Version: "Teku/vXXX-yyyyyy/x86_64-linux-MOCK",
-	},
-	{
-		ID:      "0x123",
-		Version: "Nimbus/vXXX-yyyyyy/x86_64-linux-MOCK",
-	},
+	// {
+	// 	ID:      "0xabc",
+	// 	Version: "Prysm/vXXX-yyyyyy/x86_64-linux-MOCK",
+	// },
+	// {
+	// 	ID:      "0xdef",
+	// 	Version: "Teku/vXXX-yyyyyy/x86_64-linux-MOCK",
+	// },
+	// {
+	// 	ID:      "0x123",
+	// 	Version: "Nimbus/vXXX-yyyyyy/x86_64-linux-MOCK",
+	// },
 }
 
 func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
@@ -424,12 +429,12 @@ func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// add mock responses
-	resp = append(resp, nodeResp{
-		ID:      "0xabc",
-		Version: resp[len(resp)-1].Version + "-MOCK",
-		Slot:    "550334",
-		Root:    "0x015919653fb6924f520509fbfda8b54c7b9f5808f39ddfc2c5d560bea416f394",
-	})
+	// resp = append(resp, nodeResp{
+	// 	ID:      "0xabc",
+	// 	Version: resp[len(resp)-1].Version + "-MOCK",
+	// 	Slot:    "550334",
+	// 	Root:    "0x015919653fb6924f520509fbfda8b54c7b9f5808f39ddfc2c5d560bea416f394",
+	// })
 	for _, mockNode := range sampleResponses {
 		mockNode.Slot = resp[0].Slot
 		mockNode.Root = resp[0].Root
@@ -552,6 +557,11 @@ func pruneForBrowser(node ForkChoiceNode, genesisTime int, slotsPerEpoch int, se
 	return node
 }
 
+type forkChoiceResponse struct {
+	BlockTree   ForkChoiceNode `json:"block_tree"`
+	TotalWeight float64        `json:"total_weight"`
+}
+
 func (m *Monitor) sendForkChoice(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -559,11 +569,17 @@ func (m *Monitor) sendForkChoice(w http.ResponseWriter, r *http.Request) {
 
 	m.forkchoiceLock.Lock()
 	forkChoiceSummary := m.forkChoiceSummary
+	totalWeight := m.forkChoiceTotalWeight
 	m.forkchoiceLock.Unlock()
 	forkChoiceForBrowser := pruneForBrowser(forkChoiceSummary, m.config.Eth2.GenesisTime, m.config.Eth2.SlotsPerEpoch, m.config.Eth2.SecondsPerSlot)
 
+	resp := forkChoiceResponse{
+		BlockTree:   forkChoiceForBrowser,
+		TotalWeight: totalWeight,
+	}
+
 	enc := json.NewEncoder(w)
-	err := enc.Encode(forkChoiceForBrowser)
+	err := enc.Encode(resp)
 	if err != nil {
 		log.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -588,14 +604,22 @@ func (m *Monitor) sendForkChoiceAsDOT(w http.ResponseWriter, r *http.Request) {
 	g.Write(w)
 }
 
+var cssFile = regexp.MustCompile(".css$")
+
 func (m *Monitor) serveAPI() {
 	http.HandleFunc("/spec", m.sendSpec)
 	http.HandleFunc("/heads", m.sendHeads)
 	http.HandleFunc("/block-tree", m.sendBlockTree)
 	http.HandleFunc("/fork-choice", m.sendForkChoice)
 	http.HandleFunc("/fork-choice-dot", m.sendForkChoiceAsDOT)
-	clientServer := http.FileServer(http.Dir("./public"))
-	http.Handle("/", clientServer)
+	clientServer := http.FileServer(http.Dir(m.config.OutputDir))
+	clientServerWithMimeType := func(w http.ResponseWriter, r *http.Request) {
+		if cssFile.MatchString(r.RequestURI) {
+			w.Header().Set("Content-Type", "text/css")
+		}
+		clientServer.ServeHTTP(w, r)
+	}
+	http.HandleFunc("/", clientServerWithMimeType)
 
 	log.Println("listening on port 8080...")
 	m.errc <- http.ListenAndServe(":8080", nil)

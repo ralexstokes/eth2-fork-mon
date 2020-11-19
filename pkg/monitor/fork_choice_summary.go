@@ -79,3 +79,8 @@ func computeSummary(protoArrayData []ProtoArrayNode, canonicalHeadIndex float64)
 	return blockTree
 	// return compactSingleChildren(blockTree)
 }
+
+
+func extractTotalWeight(protoArrayData []ProtoArrayNode) float64 {
+	return protoArrayData[0].Weight
+}

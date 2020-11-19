@@ -11,6 +11,7 @@ import (
 )
 
 var configFile = flag.String("config-file", "/config.yaml", "path to configuration")
+var outputDirectory = flag.String("output-dir", "public", "path to web assets")
 
 func main() {
 	flag.Parse()
@@ -31,6 +32,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	config.OutputDir = *outputDirectory
 	forkMonitor := monitor.FromConfig(config)
 
 	err = forkMonitor.Serve()
