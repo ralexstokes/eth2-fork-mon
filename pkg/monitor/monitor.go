@@ -1,7 +1,10 @@
 package monitor
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -50,6 +53,57 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		// prysm
+		versionResp, err := http.Get(endpoint + "/eth/v1alpha1/node/version")
+		if err != nil {
+			return nil, err
+		}
+		defer versionResp.Body.Close()
+		versionData := make(map[string]interface{})
+		dec := json.NewDecoder(versionResp.Body)
+		err = dec.Decode(&versionData)
+		if err != nil {
+			return nil, err
+		}
+		version := versionData["version"].(string)
+		n.version = version
+
+		n.id = idHashOf(endpoint)
+		return n, nil
+	} else if resp.StatusCode == http.StatusLengthRequired {
+		// nimbus
+		url := n.endpoint
+
+		request, err := json.Marshal(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      randomRPCID(),
+			"method":  "getNodeVersion",
+			"params":  []string{},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(request))
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		data := make(map[string]interface{})
+		dec := json.NewDecoder(resp.Body)
+		err = dec.Decode(&data)
+		if err != nil {
+			return nil, err
+		}
+		version := data["result"].(string)
+		n.version = version
+
+		n.id = idHashOf(endpoint)
+		return n, nil
+	}
+
 	defer resp.Body.Close()
 	clientResp := make(map[string]interface{})
 	dec := json.NewDecoder(resp.Body)
@@ -76,21 +130,123 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 	peerID := inner["peer_id"].(string)
 	n.id = idHashOf(peerID)
 
-	// load current head
-	err = n.doFetchLatestHead()
-	return n, err
+	return n, nil
 }
 
 type Node struct {
-	id         string // hash of peer id
-	endpoint   string
-	version    string
+	id       string // hash of peer id
+	endpoint string
+	version  string
+
 	latestHead HeadRef
-	knownHeads []HeadRef
+	isHealthy  bool // node responding?
+
+	// knownHeads []HeadRef
 }
 
 func (n *Node) String() string {
-	return fmt.Sprintf("%s at %s has head %s", n.version, n.endpoint, n.latestHead)
+	return fmt.Sprintf("[healthy: %t] %s at %s has head %s", n.isHealthy, n.version, n.endpoint, n.latestHead)
+}
+
+func isPrysm(identifier string) bool {
+	return strings.Contains(strings.ToLower(identifier), "prysm")
+}
+
+func isNimbus(identifier string) bool {
+	return strings.Contains(strings.ToLower(identifier), "nimbus")
+}
+
+func decodePrysmRoot(rootAsB64 string) (string, error) {
+	rootData, err := base64.StdEncoding.DecodeString(rootAsB64)
+	if err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(rootData), nil
+}
+
+func (n *Node) doFetchLatestHeadPrysm() error {
+	url := n.endpoint + "/eth/v1alpha1/beacon/chainhead"
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data := make(map[string]interface{})
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&data)
+	if err != nil {
+		return err
+	}
+
+	root, err := decodePrysmRoot(data["headBlockRoot"].(string))
+	if err != nil {
+		return err
+	}
+
+	root = "0x" + root
+
+	if root == n.latestHead.root {
+		return nil
+	}
+
+	slot := data["headSlot"].(string)
+
+	// This API can be slow, so if we get an old response,
+	// just drop it
+	if slot < n.latestHead.slot {
+		return nil
+	}
+
+	n.latestHead = HeadRef{slot, root}
+	return nil
+}
+
+func randomRPCID() string {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "id"
+	}
+	return hex.EncodeToString(bytes)
+}
+
+func (n *Node) doFetchLatestHeadNimbus() error {
+	url := n.endpoint
+
+	request, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      randomRPCID(),
+		"method":  "getChainHead",
+		"params":  []string{},
+	})
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(request))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data := make(map[string]interface{})
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&data)
+	if err != nil {
+		return err
+	}
+
+	resultData := data["result"].(map[string]interface{})
+	root := resultData["head_block_root"].(string)
+	root = "0x" + root
+	if root == n.latestHead.root {
+		return nil
+	}
+
+	slotNumerical := int(resultData["head_slot"].(float64))
+	slot := fmt.Sprintf("%d", slotNumerical)
+
+	n.latestHead = HeadRef{slot, root}
+	return nil
 }
 
 func (n *Node) fetchLatestHead(wg *sync.WaitGroup) {
@@ -99,10 +255,19 @@ func (n *Node) fetchLatestHead(wg *sync.WaitGroup) {
 	err := n.doFetchLatestHead()
 	if err != nil {
 		log.Println(err)
+		n.isHealthy = false
+	} else {
+		n.isHealthy = true
 	}
 }
 
 func (n *Node) doFetchLatestHead() error {
+	if isPrysm(n.version) {
+		return n.doFetchLatestHeadPrysm()
+	} else if isNimbus(n.version) {
+		return n.doFetchLatestHeadNimbus()
+	}
+
 	url := n.endpoint + headHeaderPath
 	resp, err := http.Get(url)
 	if err != nil {
@@ -131,43 +296,44 @@ func (n *Node) doFetchLatestHead() error {
 	return nil
 }
 
-func (n *Node) fetchLatestHeads(wg *sync.WaitGroup) {
-	defer wg.Done()
+// func (n *Node) fetchLatestHeads(wg *sync.WaitGroup) {
+// 	defer wg.Done()
 
-	err := n.doFetchLatestHeads()
-	if err != nil {
-		log.Println(err)
-	}
-}
+// 	err := n.doFetchLatestHeads()
+// 	if err != nil {
+// 		log.Println(err)
+// 	}
+// }
 
-func (n *Node) doFetchLatestHeads() error {
-	url := n.endpoint + headsPath
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	headsResp := make(map[string]interface{})
-	dec := json.NewDecoder(resp.Body)
-	err = dec.Decode(&headsResp)
-	if err != nil {
-		return err
-	}
+// // Returns known tips
+// func (n *Node) doFetchLatestHeads() error {
+// 	url := n.endpoint + headsPath
+// 	resp, err := http.Get(url)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	defer resp.Body.Close()
+// 	headsResp := make(map[string]interface{})
+// 	dec := json.NewDecoder(resp.Body)
+// 	err = dec.Decode(&headsResp)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	headsData := headsResp["data"].([]interface{})
+// 	headsData := headsResp["data"].([]interface{})
 
-	var heads []HeadRef
-	for _, headData := range headsData {
-		headData := headData.(map[string]interface{})
-		slot := headData["slot"].(string)
-		root := headData["root"].(string)
-		heads = append(heads, HeadRef{slot, root})
-	}
+// 	var heads []HeadRef
+// 	for _, headData := range headsData {
+// 		headData := headData.(map[string]interface{})
+// 		slot := headData["slot"].(string)
+// 		root := headData["root"].(string)
+// 		heads = append(heads, HeadRef{slot, root})
+// 	}
 
-	n.knownHeads = heads
+// 	n.knownHeads = heads
 
-	return nil
-}
+// 	return nil
+// }
 
 type ProtoArrayResp struct {
 	Data struct {
@@ -224,22 +390,27 @@ func (m *Monitor) fetchHeads() error {
 
 	wg.Wait()
 
-	if m.currentForkChoiceProvider.latestHead != lastBlockTreeHead {
-		err := m.buildLatestForkChoiceSummary()
-		if err != nil {
-			return err
+	if m.currentForkChoiceProvider != nil {
+		if m.currentForkChoiceProvider.latestHead != lastBlockTreeHead {
+			err := m.buildLatestForkChoiceSummary()
+			if err != nil {
+				return err
+			}
 		}
 	}
+
 	return nil
 }
 
 func (m *Monitor) startHeadMonitor() {
-	err := m.buildLatestForkChoiceSummary()
-	if err != nil {
-		return
+	if m.currentForkChoiceProvider != nil {
+		err := m.buildLatestForkChoiceSummary()
+		if err != nil {
+			m.errc <- err
+			return
+		}
 	}
-
-	err = m.fetchHeads()
+	err := m.fetchHeads()
 	if err != nil {
 		m.errc <- err
 		return
@@ -256,106 +427,88 @@ func (m *Monitor) startHeadMonitor() {
 	}
 }
 
-func (m *Monitor) buildBlockTree() {
-	// slot -> set[root]
-	allHeads := make(map[int64]map[string]struct{})
-	earliestSlot := ^int64(0)
-	lastSlot := int64(-1)
+// func (m *Monitor) buildBlockTree() {
+// 	// slot -> set[root]
+// 	allHeads := make(map[int64]map[string]struct{})
+// 	earliestSlot := ^int64(0)
+// 	lastSlot := int64(-1)
 
-	for _, node := range m.nodes {
-		for _, head := range node.knownHeads {
-			slotAsSomeInt, _ := strconv.Atoi(head.slot)
-			slotAsInt := int64(slotAsSomeInt)
-			if slotAsInt < earliestSlot {
-				earliestSlot = slotAsInt
-			}
+// 	for _, node := range m.nodes {
+// 		for _, head := range node.knownHeads {
+// 			slotAsSomeInt, _ := strconv.Atoi(head.slot)
+// 			slotAsInt := int64(slotAsSomeInt)
+// 			if slotAsInt < earliestSlot {
+// 				earliestSlot = slotAsInt
+// 			}
 
-			if slotAsInt > lastSlot {
-				lastSlot = slotAsInt
-			}
-			headsAtSlot, ok := allHeads[slotAsInt]
-			if !ok {
-				headsAtSlot = make(map[string]struct{})
-			}
-			headsAtSlot[head.root] = struct{}{}
-			allHeads[slotAsInt] = headsAtSlot
-		}
-	}
+// 			if slotAsInt > lastSlot {
+// 				lastSlot = slotAsInt
+// 			}
+// 			headsAtSlot, ok := allHeads[slotAsInt]
+// 			if !ok {
+// 				headsAtSlot = make(map[string]struct{})
+// 			}
+// 			headsAtSlot[head.root] = struct{}{}
+// 			allHeads[slotAsInt] = headsAtSlot
+// 		}
+// 	}
 
-	count := 0
-	for i := earliestSlot; i <= lastSlot; i++ {
-		roots, ok := allHeads[i]
-		if !ok {
-			continue
-		}
-		count += len(roots)
-	}
-	m.knownHeadCount = count
-}
+// 	count := 0
+// 	for i := earliestSlot; i <= lastSlot; i++ {
+// 		roots, ok := allHeads[i]
+// 		if !ok {
+// 			continue
+// 		}
+// 		count += len(roots)
+// 	}
+// 	m.knownHeadCount = count
+// }
 
-func (m *Monitor) fetchLatestBlockTree() error {
-	var wg sync.WaitGroup
+// func (m *Monitor) fetchLatestBlockTree() error {
+// 	var wg sync.WaitGroup
 
-	for _, node := range m.nodes {
-		wg.Add(1)
-		go node.fetchLatestHeads(&wg)
-	}
+// 	for _, node := range m.nodes {
+// 		wg.Add(1)
+// 		go node.fetchLatestHeads(&wg)
+// 	}
 
-	wg.Wait()
+// 	wg.Wait()
 
-	m.buildBlockTree()
+// 	m.buildBlockTree()
 
-	return nil
-}
+// 	return nil
+// }
 
-func (m *Monitor) startBlockTreeMonitor() {
-	err := m.fetchLatestBlockTree()
-	if err != nil {
-		m.errc <- err
-		return
-	}
+// func (m *Monitor) startBlockTreeMonitor() {
+// 	err := m.fetchLatestBlockTree()
+// 	if err != nil {
+// 		m.errc <- err
+// 		return
+// 	}
 
-	for {
-		time.Sleep(pollingDuration)
+// 	for {
+// 		time.Sleep(pollingDuration)
 
-		err := m.fetchLatestBlockTree()
-		if err != nil {
-			m.errc <- err
-			return
-		}
-	}
-}
+// 		err := m.fetchLatestBlockTree()
+// 		if err != nil {
+// 			m.errc <- err
+// 			return
+// 		}
+// 	}
+// }
 
 func (m *Monitor) buildLatestForkChoiceSummary() error {
-	// log.Println("building fork choice summary")
-	// keep trying until proto array response is synchonrized w/ node's head
 	protoArray, err := m.currentForkChoiceProvider.fetchProtoArray()
 	if err != nil {
 		return err
 	}
 
-	// skip finding head w/ highest weight in our (possibly stale) view
-	// by querying the node's head and ensuring it is consistent w/ the proto array response
-	// err = m.currentForkChoiceProvider.doFetchLatestHead()
-	// if err != nil {
-	// 	return err
-	// }
-	// head := m.currentForkChoiceProvider.latestHead
-
 	root := protoArray[0]
 	headIndex := root.BestDescendant
-	// headNode := protoArray[int(headIndex)]
-	// if head.root != headNode.Root {
-	// 	// view is not synchronized, let's just try again
-	// 	// this should be a very temporary issue based on internals of the `currentForkChoiceProvider`
-	// 	continue
-	// }
-
 	summary := computeSummary(protoArray, headIndex)
 
 	totalWeight := extractTotalWeight(protoArray)
 
-	// log.Println("updated with head", headNode.Root)
 	m.forkchoiceLock.Lock()
 	defer m.forkchoiceLock.Unlock()
 
@@ -365,6 +518,10 @@ func (m *Monitor) buildLatestForkChoiceSummary() error {
 }
 
 func (m *Monitor) startProtoArrayMonitor() {
+	if m.currentForkChoiceProvider == nil {
+		return
+	}
+
 	err := m.buildLatestForkChoiceSummary()
 	if err != nil {
 		m.errc <- err
@@ -400,21 +557,7 @@ type nodeResp struct {
 	Version string `json:"version"`
 	Slot    string `json:"slot"`
 	Root    string `json:"root"`
-}
-
-var sampleResponses = []nodeResp{
-	// {
-	// 	ID:      "0xabc",
-	// 	Version: "Prysm/vXXX-yyyyyy/x86_64-linux-MOCK",
-	// },
-	// {
-	// 	ID:      "0xdef",
-	// 	Version: "Teku/vXXX-yyyyyy/x86_64-linux-MOCK",
-	// },
-	// {
-	// 	ID:      "0x123",
-	// 	Version: "Nimbus/vXXX-yyyyyy/x86_64-linux-MOCK",
-	// },
+	Healthy bool   `json:"healthy"`
 }
 
 func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
@@ -425,21 +568,8 @@ func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 			Version: node.version,
 			Slot:    node.latestHead.slot,
 			Root:    node.latestHead.root,
+			Healthy: node.isHealthy,
 		})
-	}
-
-	// add mock responses
-	// resp = append(resp, nodeResp{
-	// 	ID:      "0xabc",
-	// 	Version: resp[len(resp)-1].Version + "-MOCK",
-	// 	Slot:    "550334",
-	// 	Root:    "0x015919653fb6924f520509fbfda8b54c7b9f5808f39ddfc2c5d560bea416f394",
-	// })
-	for _, mockNode := range sampleResponses {
-		mockNode.Slot = resp[0].Slot
-		mockNode.Root = resp[0].Root
-
-		resp = append(resp, mockNode)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -525,9 +655,6 @@ func computeCurrentSlot(genesisTime int, secondsPerSlot int) int {
 	return int(secondsSinceGenesis / int64(secondsPerSlot))
 }
 
-// Return the block in the block tree represented by `node`
-// such that the count of all nodes in the resulting tree
-// are near `forkChoiceNodePreferredCount`
 func pruneForBrowser(node ForkChoiceNode, genesisTime int, slotsPerEpoch int, secondsPerSlot int) ForkChoiceNode {
 	currentSlot := computeCurrentSlot(genesisTime, secondsPerSlot)
 	currentEpoch := int(currentSlot / slotsPerEpoch)
@@ -539,14 +666,19 @@ func pruneForBrowser(node ForkChoiceNode, genesisTime int, slotsPerEpoch int, se
 	targetSlot := targetEpoch * slotsPerEpoch
 	slot, err := strconv.Atoi(node.Slot)
 	if err != nil {
+		log.Println(err)
 		return node
 	}
 	for slot < targetSlot {
+		if len(node.Children) == 0 {
+			return node
+		}
 		for _, child := range node.Children {
 			if child.IsCanonical {
 				node = child
 				slot, err = strconv.Atoi(node.Slot)
 				if err != nil {
+					log.Println(err)
 					return node
 				}
 				break
@@ -565,7 +697,6 @@ type forkChoiceResponse struct {
 func (m *Monitor) sendForkChoice(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	// log.Println("serving request for fork choice")
 
 	m.forkchoiceLock.Lock()
 	forkChoiceSummary := m.forkChoiceSummary
@@ -609,7 +740,10 @@ var cssFile = regexp.MustCompile(".css$")
 func (m *Monitor) serveAPI() {
 	http.HandleFunc("/spec", m.sendSpec)
 	http.HandleFunc("/heads", m.sendHeads)
-	http.HandleFunc("/block-tree", m.sendBlockTree)
+
+	// m.sendBlockTree is WIP...
+	// http.HandleFunc("/block-tree", m.sendBlockTree)
+
 	http.HandleFunc("/fork-choice", m.sendForkChoice)
 	http.HandleFunc("/fork-choice-dot", m.sendForkChoiceAsDOT)
 	clientServer := http.FileServer(http.Dir(m.config.OutputDir))
@@ -643,6 +777,7 @@ func (m *Monitor) Serve() error {
 	log.Println("aligned to slot, continuting")
 	go m.startHeadMonitor()
 	// go m.startBlockTreeMonitor()
+	// NOTE: explicitly do when we fetch a new head
 	// go m.startProtoArrayMonitor()
 	go m.serveAPI()
 	return <-m.errc
@@ -657,6 +792,13 @@ func FromConfig(config *Config) *Monitor {
 			log.Println(err)
 			continue
 		}
+
+		err = node.doFetchLatestHead()
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		node.isHealthy = true
 		if strings.Contains(node.version, "Lighthouse") {
 			forkChoiceProvider = node
 		}

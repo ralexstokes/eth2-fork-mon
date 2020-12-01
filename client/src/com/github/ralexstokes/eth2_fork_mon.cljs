@@ -30,12 +30,14 @@
   (let [current-time (get-time)
         time-in-secs (in-seconds current-time)
         slot (slot-from-timestamp time-in-secs genesis-time seconds-per-slot)
-        slot-start-in-seconds  (+ genesis-time (* slot seconds-per-slot))]
+        slot-start-in-seconds  (+ genesis-time (* slot seconds-per-slot))
+        delta (- time-in-secs slot-start-in-seconds)
+        delta (if (< delta 0) (- seconds-per-slot (Math/abs delta)) delta)
+        progress (* 100 (/ delta seconds-per-slot))]
     {:slot slot
-     :epoch (quot slot slots-per-epoch)
+     :epoch (Math/floor (/ slot slots-per-epoch))
      :slot-in-epoch (mod slot slots-per-epoch)
-     :progress-into-slot (* 100 (/ (- current-time (* slot-start-in-seconds 1000)) (* seconds-per-slot 1000)))
-     :seconds-into-slot (- time-in-secs slot-start-in-seconds)}))
+     :progress-into-slot progress}))
 
 (defonce state (r/atom {:network ""}))
 
@@ -46,9 +48,8 @@
      (pprint/pprint data))])
 
 (defn round-to-extremes [x]
-  (let [margin 4]
+  (let [margin 10]
     (cond
-      (< x margin) 0
       (> x (- 100 margin)) 100
       :else x)))
 
@@ -69,11 +70,15 @@
           {:style
            {:width (str (round-to-extremes progress-into-slot) "%")}}]]]])))
 
-(defn peer-view [index {:keys [name version]}]
+(defn peer-view [index {:keys [name version healthy]}]
   [:tr {:key index}
    [:th {:scope :row}
     name]
-   [:td version]])
+   [:td version]
+   [:td {:style {:text-align "center"}}
+    (if healthy
+          "🟢"
+          "🔴")]])
 
 (defn nodes-view []
   (when-let [peers (:heads @state)]
@@ -90,7 +95,9 @@
          [:thead
           [:tr
            [:th {:scope :col} "Name"]
-           [:th {:scope :col} "Version"]]]
+           [:th {:scope :col} "Version"]
+           [:th {:scope :col
+                 :style {:text-align "center"}} "Healthy?"]]]
          [:tbody
           (map-indexed peer-view peers)]]]]]]))
 
@@ -104,34 +111,35 @@
     "mainnet" ""
     (str network ".")))
 
-(defn head-view [index {:keys [name slot root is-majority?]}]
+(defn head-view [network index {:keys [name slot root is-majority?]}]
   [:tr {:class (if is-majority? :table-success :table-danger)
         :key index}
    [:th {:scope :row}
     name]
    [:td [:a {:href (str "https://"
-                        (network->beaconchain-prefix (:network @state))
+                        (network->beaconchain-prefix network)
                         "beaconcha.in/block/"
                         slot)} slot]]
    [:td [:a {:href (str "https://"
-                        (network->beaconchain-prefix (:network @state))
+                        (network->beaconchain-prefix network)
                         "beaconcha.in/block/"
                         (subs root 2))} (humanize-hex root)]]])
 
 (defn compare-heads-view []
   (when-let [heads (:heads @state)]
-    [:div.card
-     [:div.card-header
-      "Latest head by node"]
-     [:div.card-body
-      [:table.table.table-hover
-       [:thead
-        [:tr
-         [:th {:scope :col} "Name"]
-         [:th {:scope :col} "Slot"]
-         [:th {:scope :col} "Root"]]]
-       [:tbody
-        (map-indexed head-view heads)]]]]))
+    (let [network (:network @state)]
+      [:div.card
+       [:div.card-header
+        "Latest head by node"]
+       [:div.card-body
+        [:table.table.table-hover
+         [:thead
+          [:tr
+           [:th {:scope :col} "Name"]
+           [:th {:scope :col} "Slot"]
+           [:th {:scope :col} "Root"]]]
+         [:tbody
+          (map-indexed #(head-view network %1 %2) heads)]]]])))
 
 (defn count-heads [root]
   (.-length (.leaves root)))
@@ -226,12 +234,12 @@
 (def polling-frequency 700) ;; ms
 (def slot-clock-refresh-frequency 100) ;; ms
 
-(defn fetch-head-count []
-  (go (let [response (<! (http/get "/block-tree"
-                                   {:with-credentials? false}))
-            response-body (:body response)
-            head-count (:head_count response-body)]
-        (swap! state assoc :head-count head-count))))
+;; (defn fetch-head-count []
+;;   (go (let [response (<! (http/get "/block-tree"
+;;                                    {:with-credentials? false}))
+;;             response-body (:body response)
+;;             head-count (:head_count response-body)]
+;;         (swap! state assoc :head-count head-count))))
 
 (defn empty-svg! [svg]
   (.remove svg))
@@ -265,8 +273,9 @@
 (defn node->label [total-weight d]
   (let [data (.-data d)
         root (-> data .-root humanize-hex)
-        weight (.-weight data)]
-    (str root ", " (-> (/ weight total-weight) (* 100) (.toFixed 2)) "%")))
+        weight (.-weight data)
+        weight-fraction (if (zero? total-weight) 0 (/ weight total-weight))]
+    (str root ", " (-> weight-fraction (* 100) (.toFixed 2)) "%")))
 
 (defn canonical-node? [d]
   (-> d
@@ -304,11 +313,6 @@
     (if (canonical-node? d)
       "#d5ad2a"
       "")))
-
-(defn network->beaconchain-prefix [network]
-  (case network
-    "mainnet" ""
-    (str network ".")))
 
 (defn node->block-explorer-link [d]
   (str "https://"
@@ -413,10 +417,10 @@
     (draw-tree! root width total-weight)))
 
 
-(defn start-polling-for-head-count []
-  (fetch-head-count)
-  (let [head-count-task (js/setInterval fetch-head-count polling-frequency)]
-    (swap! state assoc :head-count-task head-count-task)))
+;; (defn start-polling-for-head-count []
+;;   (fetch-head-count)
+;;   (let [head-count-task (js/setInterval fetch-head-count polling-frequency)]
+;;     (swap! state assoc :head-count-task head-count-task)))
 
 (defn refresh-fork-choice []
   (go (let [response (<! (http/get "/fork-choice"
