@@ -35,6 +35,9 @@ func (m *Monitor) fetchHeads() error {
 		if node == m.currentForkChoiceProvider {
 			lastBlockTreeHead = node.latestHead
 		}
+		if node.isSyncing {
+			go node.doFetchSyncStatus()
+		}
 		go node.fetchLatestHead(&wg)
 	}
 
@@ -74,7 +77,7 @@ func (m *Monitor) startHeadMonitor() {
 
 func (m *Monitor) buildLatestForkChoiceSummary() error {
 	if m.currentForkChoiceProvider.isSyncing {
-		return nil
+		return m.currentForkChoiceProvider.doFetchSyncStatus()
 	}
 
 	protoArray, err := m.currentForkChoiceProvider.fetchProtoArray()

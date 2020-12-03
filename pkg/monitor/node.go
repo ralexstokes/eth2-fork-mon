@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -126,22 +127,34 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 	peerID := inner["peer_id"].(string)
 	n.id = idHashOf(peerID)
 
-	syncResp, err := n.client.Get(endpoint + nodeSyncingPath)
+	err = n.doFetchSyncStatus()
+	return n, err
+}
+
+func (n *Node) doFetchSyncStatus() error {
+	syncResp, err := n.client.Get(n.endpoint + nodeSyncingPath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer syncResp.Body.Close()
 	syncData := make(map[string]interface{})
-	dec = json.NewDecoder(syncResp.Body)
+	dec := json.NewDecoder(syncResp.Body)
 	err = dec.Decode(&syncData)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	inner = syncData["data"].(map[string]interface{})
-	isSyncing := inner["is_syncing"].(bool)
-	n.isSyncing = isSyncing
-
-	return n, nil
+	inner := syncData["data"].(map[string]interface{})
+	if result, ok := inner["is_syncing"].(bool); ok {
+		n.isSyncing = result
+		return nil
+	}
+	syncDistanceStr := inner["sync_distance"].(string)
+	syncDistance, err := strconv.Atoi(syncDistanceStr)
+	if err != nil {
+		return err
+	}
+	n.isSyncing = syncDistance > 1
+	return nil
 }
 
 type Node struct {
