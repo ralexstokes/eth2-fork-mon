@@ -58,29 +58,7 @@ func rollProtoArray(protoArrayData []ProtoArrayNode, canonicalHeadIndex float64)
 	return buildTree(rootNode, nodes, childrenIndex)
 }
 
-// Summarize the full block tree by only keeping the root, heads and fork points in between
-func compactSingleChildren(node ForkChoiceNode) ForkChoiceNode {
-	if len(node.Children) == 1 {
-		child := node.Children[0]
-		for len(child.Children) == 1 {
-			child = child.Children[0]
-			node.CountCollapsedBlocks += 1
-		}
-		node.Children[0] = child
-	}
-	for i, child := range node.Children {
-		node.Children[i] = compactSingleChildren(child)
-	}
-	return node
-}
-
 func computeSummary(protoArrayData []ProtoArrayNode, canonicalHeadIndex float64) ForkChoiceNode {
 	blockTree := rollProtoArray(protoArrayData, canonicalHeadIndex)
 	return blockTree
-	// return compactSingleChildren(blockTree)
-}
-
-
-func extractTotalWeight(protoArrayData []ProtoArrayNode) float64 {
-	return protoArrayData[0].Weight
 }

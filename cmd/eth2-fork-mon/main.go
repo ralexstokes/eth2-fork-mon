@@ -33,7 +33,14 @@ func main() {
 	}
 
 	config.OutputDir = *outputDirectory
+	config.Eth2.SecondsPerSlot = 12
+	config.Eth2.SlotsPerEpoch = 32
 	forkMonitor := monitor.FromConfig(config)
+
+	err = forkMonitor.Start()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	err = forkMonitor.Serve()
 	if err != nil {
