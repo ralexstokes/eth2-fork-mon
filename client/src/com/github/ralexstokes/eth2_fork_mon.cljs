@@ -157,7 +157,7 @@
       "Canonical head root: " (get @state :majority-root "")]
      [:p
       [:small
-       "NOTE: nodes are labeled with their block root. Percentages are amounts of stake relative to the justified root."]]
+       "NOTE: nodes are labeled with their block root. Percentages are amounts of stake attesting to a block relative to the finalized block."]]
      [:p
       [:small
        "NOTE: visualization may take a slot to synchronize."]]
@@ -426,7 +426,7 @@
   (go (let [response (<! (http/get "/fork-choice"
                                    {:with-credentials? false}))
             block-tree (get-in response [:body :block_tree])
-            total-weight (get-in response [:body :total_weight])
+            total-weight (:weight block-tree)
             fork-choice (js/d3.hierarchy (clj->js block-tree))]
         (render-fork-choice! fork-choice total-weight))))
 
@@ -440,7 +440,7 @@
     (refresh-fork-choice)))
 
 (defn fetch-heads []
-  (go (let [response (<! (http/get "heads"
+  (go (let [response (<! (http/get "/chain-monitor"
                                    {:with-credentials? false}))
             heads (:body response)
             [majority-root _] (process-heads-response heads)
