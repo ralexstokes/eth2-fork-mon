@@ -4,7 +4,6 @@ go 1.15
 
 require (
 	github.com/cweill/gotests v1.5.3 // indirect
-	github.com/emicklei/dot v0.14.0
 	github.com/fatih/gomodifytags v1.11.0 // indirect
 	github.com/keegancsmith/rpc v1.3.0 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
