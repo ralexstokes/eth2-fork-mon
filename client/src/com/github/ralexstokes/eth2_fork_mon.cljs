@@ -41,11 +41,14 @@
 
 (defonce state (r/atom {:network ""}))
 
-;; debug utility
 (defn render-edn [data]
   [:pre
    (with-out-str
      (pprint/pprint data))])
+
+(defn debug-view []
+  [:div.row.debug
+   (render-edn @state)])
 
 (defn round-to-extremes [x]
   (let [margin 10]
@@ -147,31 +150,18 @@
          [:tbody
           (map-indexed #(head-view network %1 %2) heads)]]]])))
 
-(defn count-heads [root]
-  (.-length (.leaves root)))
-
 (defn tree-view []
   [:div.card
    [:div.card-header
     "Block tree over last 4 epochs"]
    [:div.card-body
     [:div#head-count-viewer
-     (when-let [head-count (:head-count @state)]
-       [:p
-      "Count of heads in beacon node's view: " head-count])
      [:p
       "Canonical head root: " (get @state :majority-root "")]
      [:p
       [:small
        "NOTE: nodes are labeled with their block root. Percentages are amounts of stake attesting to a block relative to the finalized block."]]
-     [:p
-      [:small
-       "NOTE: visualization may take a slot to synchronize."]]
      [:div#fork-choice.svg-container]]]])
-
-(defn debug-view []
-  [:div.row.debug
-   (render-edn @state)])
 
 (defn container-row
   "layout for a 'widget'"
@@ -476,15 +466,30 @@
   (let [timer-task (js/setInterval update-slot-clock slot-clock-refresh-frequency)]
     (swap! state assoc :timer-task timer-task)))
 
+(defn push-hash [e]
+  (.pushState js/history (clj->js {}) "" (-> e .-target .-hash)))
+
+(defn install-navigation []
+  (-> (js/$ "a[data-toggle=\"tab\"]")
+      (.on "shown.bs.tab" push-hash)))
+
+(defn restore-last-navigation []
+  (let [hash (-> js/document .-location .-hash)]
+    (when (not (= "" hash))
+      (-> (js/$ (str ".nav a[href=\"" (str/replace hash #"tab_" "") "\"]"))
+          (.tab "show")))))
+
 (defn start-viz []
   (go (let [spec-response (fetch-spec-from-server)
             spec (:body (<! spec-response))]
         (swap! state assoc :eth2-spec spec)
         (swap! state assoc :network (:network spec))
         (mount)
+        (install-navigation)
         (start-slot-clock)
         (start-polling-for-heads)
         (refresh-fork-choice)
+        (restore-last-navigation)
         )))
 
 (defonce init
