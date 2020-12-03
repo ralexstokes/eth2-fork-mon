@@ -10,6 +10,8 @@
    [cljs.core.async :refer [<! chan close!]]))
 
 (def debug-mode? false)
+(def polling-frequency 700) ;; ms
+(def slot-clock-refresh-frequency 100) ;; ms
 
 (defn put! [& objs]
   (doseq [obj objs]
@@ -227,44 +229,8 @@
 (defn attach-name [peer]
   (assoc peer :name (name-from (:version peer))))
 
-(def polling-frequency 700) ;; ms
-(def slot-clock-refresh-frequency 100) ;; ms
-
-;; (defn fetch-head-count []
-;;   (go (let [response (<! (http/get "/block-tree"
-;;                                    {:with-credentials? false}))
-;;             response-body (:body response)
-;;             head-count (:head_count response-body)]
-;;         (swap! state assoc :head-count head-count))))
-
 (defn empty-svg! [svg]
   (.remove svg))
-
-;; NOTE: this function only labels leaves, the root and fork points with weights
-;; (defn node->label
-;;   "Label nodes with their root. If they are leaves or have direct siblings, add percent weight"
-;;   [total-weight d]
-;;   (let [data (.-data d)
-;;         root (-> data .-root humanize-hex)
-;;         leaf? (= 0 (count (.-children d)))
-;;         suffix (if-let [parent (.-parent d)] ;; add weight to fork points
-;;                  (if-let [siblings (.-children parent)]
-;;                    (if (> (.-length siblings) 1)
-;;                      (.-weight data)
-;;                      "") ;; no siblings
-;;                    "") ;; default
-;;                  (.-weight data)) ;; root of tree
-;;         suffix (if (and leaf?
-;;                         (= "" suffix))
-;;                  (.-weight data)
-;;                  suffix)]
-;;     (if (= suffix "")
-;;       root
-;;       (if (zero? suffix)
-;;         (str root ", 0%")
-;;         (str root ", " (-> (/ suffix total-weight)
-;;                            (* 100)
-;;                            (.toFixed 4)) "%")))))
 
 (defn node->label [total-weight d]
   (let [data (.-data d)
@@ -361,19 +327,19 @@
               (.append "g")
               (.attr "transform"
                      (str "translate(" (/ width 2) "," height ") rotate(180)")))
-        links  (-> g
-                   (.append "g")
-                   (.attr "fill" "none")
-                   (.attr "stroke"  "#555")
-                   (.attr "stroke-opacity" 0.4)
-                   (.attr "stroke-width" 1.5)
-                   (.selectAll "path")
-                   (.data (.links root))
-                   (.join "path")
-                   (.attr "d" (-> (js/d3.linkVertical)
-                                  (.x #(.-x %))
-                                  (.y #(node->y-offset lowest-slot dy %))
-                                  )))
+        _  (-> g
+               (.append "g")
+               (.attr "fill" "none")
+               (.attr "stroke"  "#555")
+               (.attr "stroke-opacity" 0.4)
+               (.attr "stroke-width" 1.5)
+               (.selectAll "path")
+               (.data (.links root))
+               (.join "path")
+               (.attr "d" (-> (js/d3.linkVertical)
+                              (.x #(.-x %))
+                              (.y #(node->y-offset lowest-slot dy %))
+                              )))
 
         nodes   (-> g
                     (.append "g")
@@ -413,11 +379,6 @@
     (draw-tree! root width total-weight)))
 
 
-;; (defn start-polling-for-head-count []
-;;   (fetch-head-count)
-;;   (let [head-count-task (js/setInterval fetch-head-count polling-frequency)]
-;;     (swap! state assoc :head-count-task head-count-task)))
-
 (defn refresh-fork-choice []
   (go (let [response (<! (http/get "/fork-choice"
                                    {:with-credentials? false}))
@@ -441,7 +402,9 @@
             heads (:body response)
             [majority-root _] (process-heads-response heads)
             old-root (get @state :majority-root "")]
-        (go (let [blocking-task (block-for 3000)]
+        ;; NOTE: we block here to give the backend time to compute
+        ;; the updated fork choice... should be able to improve
+        (go (let [blocking-task (block-for 700)]
               (<! blocking-task)
               (fetch-block-tree-if-new-head old-root majority-root)))
         (swap! state assoc :majority-root majority-root)
