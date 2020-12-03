@@ -70,7 +70,7 @@
           {:style
            {:width (str (round-to-extremes progress-into-slot) "%")}}]]]])))
 
-(defn peer-view [index {:keys [name version healthy]}]
+(defn peer-view [index {:keys [name version healthy syncing]}]
   [:tr {:key index}
    [:th {:scope :row}
     name]
@@ -78,7 +78,11 @@
    [:td {:style {:text-align "center"}}
     (if healthy
           "🟢"
-          "🔴")]])
+          "🔴")]
+   [:td {:style {:text-align "center"}}
+    (if syncing
+          "Yes"
+          "No")]])
 
 (defn nodes-view []
   (when-let [peers (:heads @state)]
@@ -97,7 +101,9 @@
            [:th {:scope :col} "Name"]
            [:th {:scope :col} "Version"]
            [:th {:scope :col
-                 :style {:text-align "center"}} "Healthy?"]]]
+                 :style {:text-align "center"}} "Healthy?"]
+           [:th {:scope :col
+                 :style {:text-align "center"}} "Syncing?"]]]
          [:tbody
           (map-indexed peer-view peers)]]]]]]))
 

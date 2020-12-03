@@ -42,10 +42,12 @@ func (m *Monitor) fetchHeads() error {
 
 	if m.currentForkChoiceProvider != nil {
 		if m.currentForkChoiceProvider.latestHead != lastBlockTreeHead {
-			err := m.buildLatestForkChoiceSummary()
-			if err != nil {
-				return err
-			}
+			go func() {
+				err := m.buildLatestForkChoiceSummary()
+				if err != nil {
+					log.Println(err)
+				}
+			}()
 		}
 	}
 
@@ -71,6 +73,10 @@ func (m *Monitor) startHeadMonitor() {
 }
 
 func (m *Monitor) buildLatestForkChoiceSummary() error {
+	if m.currentForkChoiceProvider.isSyncing {
+		return nil
+	}
+
 	protoArray, err := m.currentForkChoiceProvider.fetchProtoArray()
 	if err != nil {
 		return err
@@ -106,18 +112,27 @@ type nodeResp struct {
 	Slot    string `json:"slot"`
 	Root    string `json:"root"`
 	Healthy bool   `json:"healthy"`
+	Syncing *bool `json:"syncing"`
 }
 
 func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 	var resp []nodeResp
 	for _, node := range m.nodes {
-		resp = append(resp, nodeResp{
+		response := nodeResp{
 			ID:      node.id,
 			Version: node.version,
 			Slot:    node.latestHead.slot,
 			Root:    node.latestHead.root,
 			Healthy: node.isHealthy,
-		})
+			Syncing: &node.isSyncing,
+		}
+		if isPrysm(response.Version) {
+			response.Syncing = nil
+		}
+		if isNimbus(response.Version) {
+			response.Syncing = nil
+		}
+		resp = append(resp, response)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

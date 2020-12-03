@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 const clientVersionPath = "/eth/v1/node/version"
 const nodeIdentityPath = "/eth/v1/node/identity"
+const nodeSyncingPath = "/eth/v1/node/syncing"
 
 type HeadRef struct {
 	slot string
@@ -39,14 +41,18 @@ func idHashOf(peerID string) string {
 func nodeAtEndpoint(endpoint string) (*Node, error) {
 	n := &Node{endpoint: endpoint}
 
-	resp, err := http.Get(endpoint + clientVersionPath)
+	// set timeout for all HTTP requests...
+	// in particular, Prysm endpoint can be slow...
+	n.client.Timeout = 800 * time.Millisecond
+
+	resp, err := n.client.Get(endpoint + clientVersionPath)
 	if err != nil {
 		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		// prysm
-		versionResp, err := http.Get(endpoint + "/eth/v1alpha1/node/version")
+		versionResp, err := n.client.Get(endpoint + "/eth/v1alpha1/node/version")
 		if err != nil {
 			return nil, err
 		}
@@ -76,7 +82,7 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 			return nil, err
 		}
 
-		resp, err := http.Post(url, "application/json", bytes.NewBuffer(request))
+		resp, err := n.client.Post(url, "application/json", bytes.NewBuffer(request))
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +111,7 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 	version := inner["version"].(string)
 	n.version = version
 
-	identityResp, err := http.Get(endpoint + nodeIdentityPath)
+	identityResp, err := n.client.Get(endpoint + nodeIdentityPath)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +126,21 @@ func nodeAtEndpoint(endpoint string) (*Node, error) {
 	peerID := inner["peer_id"].(string)
 	n.id = idHashOf(peerID)
 
+	syncResp, err := n.client.Get(endpoint + nodeSyncingPath)
+	if err != nil {
+		return nil, err
+	}
+	defer syncResp.Body.Close()
+	syncData := make(map[string]interface{})
+	dec = json.NewDecoder(syncResp.Body)
+	err = dec.Decode(&syncData)
+	if err != nil {
+		return nil, err
+	}
+	inner = syncData["data"].(map[string]interface{})
+	isSyncing := inner["is_syncing"].(bool)
+	n.isSyncing = isSyncing
+
 	return n, nil
 }
 
@@ -131,6 +152,8 @@ type Node struct {
 	latestHead HeadRef
 	isHealthy  bool // node responding?
 	isSyncing  bool
+
+	client http.Client
 }
 
 func (n *Node) String() string {
@@ -156,7 +179,7 @@ func decodePrysmRoot(rootAsB64 string) (string, error) {
 
 func (n *Node) doFetchLatestHeadPrysm() error {
 	url := n.endpoint + "/eth/v1alpha1/beacon/chainhead"
-	resp, err := http.Get(url)
+	resp, err := n.client.Get(url)
 	if err != nil {
 		return err
 	}
@@ -212,7 +235,7 @@ func (n *Node) doFetchLatestHeadNimbus() error {
 		return err
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(request))
+	resp, err := n.client.Post(url, "application/json", bytes.NewBuffer(request))
 	if err != nil {
 		return err
 	}
@@ -258,7 +281,7 @@ func (n *Node) doFetchLatestHead() error {
 	}
 
 	url := n.endpoint + headHeaderPath
-	resp, err := http.Get(url)
+	resp, err := n.client.Get(url)
 	if err != nil {
 		return err
 	}
@@ -301,7 +324,7 @@ type ProtoArrayNode struct {
 
 func (n *Node) fetchProtoArray() ([]ProtoArrayNode, error) {
 	url := n.endpoint + protoArrayPath
-	resp, err := http.Get(url)
+	resp, err := n.client.Get(url)
 	if err != nil {
 		return nil, err
 	}
