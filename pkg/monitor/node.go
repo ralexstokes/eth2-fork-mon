@@ -19,6 +19,7 @@ import (
 const clientVersionPath = "/eth/v1/node/version"
 const nodeIdentityPath = "/eth/v1/node/identity"
 const nodeSyncingPath = "/eth/v1/node/syncing"
+const finalityCheckpointsPath = "/eth/v1/beacon/states/head/finality_checkpoints"
 
 type HeadRef struct {
 	slot string
@@ -276,7 +277,6 @@ func (n *Node) doFetchLatestHeadNimbus() error {
 
 func (n *Node) fetchLatestHead(wg *sync.WaitGroup) {
 	defer wg.Done()
-
 	err := n.doFetchLatestHead()
 	if err != nil {
 		log.Println(err)
@@ -346,4 +346,33 @@ func (n *Node) fetchProtoArray() ([]ProtoArrayNode, error) {
 	dec := json.NewDecoder(resp.Body)
 	err = dec.Decode(&protoArrayResp)
 	return protoArrayResp.Data.Nodes, err
+}
+
+type Checkpoint struct {
+	Epoch string `json:"epoch"`
+	Root string `json:"root"`
+}
+
+func (n *Node) fetchFinalityCheckpoints() (justified Checkpoint, finalized Checkpoint, err error) {
+	url := n.endpoint + finalityCheckpointsPath
+	resp, err := n.client.Get(url)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	data := make(map[string]interface{})
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&data)
+	if err != nil {
+		return
+	}
+
+	finalityData := data["data"].(map[string]interface{})
+	justifiedData := finalityData["current_justified"].(map[string]interface{})
+	justified.Epoch = justifiedData["epoch"].(string)
+	justified.Root = justifiedData["root"].(string)
+	finalizedData := finalityData["finalized"].(map[string]interface{})
+	finalized.Epoch = finalizedData["epoch"].(string)
+	finalized.Root = finalizedData["root"].(string)
+	return
 }

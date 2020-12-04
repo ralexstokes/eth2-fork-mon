@@ -41,7 +41,19 @@
      :slot-in-epoch (mod slot slots-per-epoch)
      :progress-into-slot progress}))
 
-(defonce state (r/atom {:network ""}))
+(defn humanize-hex [hex-str]
+  (str (subs hex-str 2 6)
+       ".."
+       (subs hex-str (- (count hex-str) 4))))
+
+(defn network->beaconchain-prefix [network]
+  (case network
+    "mainnet" ""
+    (str network ".")))
+
+(defonce state (r/atom {:network ""
+                        :justified-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
+                        :finalized-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}}))
 
 (defn render-edn [data]
   [:pre
@@ -62,18 +74,40 @@
   (when-let [eth2-spec (:eth2-spec @state)]
     (let [{:keys [slots_per_epoch]} eth2-spec
           slots-per-epoch slots_per_epoch
-          {:keys [slot epoch slot-in-epoch progress-into-slot]} (:slot-clock @state)]
-      [:div.card
-       [:div.card-header
-        "Clock"]
-       [:div.card-body
-        [:p (str "Epoch: " epoch " (slot: " slot ")")]
-        [:p (str "Slot in epoch: " slot-in-epoch " / " slots-per-epoch)]
-        "Progress through slot:"
-        [:div.progress
-         [:div.progress-bar
-          {:style
-           {:width (str (round-to-extremes progress-into-slot) "%")}}]]]])))
+          network (:network @state)
+          network-prefix (network->beaconchain-prefix network)
+          {:keys [slot epoch slot-in-epoch progress-into-slot]} (:slot-clock @state)
+          justified (:justified-checkpoint @state)
+          finalized (:finalized-checkpoint @state)
+          head-root (get @state :majority-root "")]
+      [:div#chain-drawer.accordion
+       [:div.card
+        [:div.card-header
+         [:button.btn.btn-link.btn-block.text-left {:type :button
+                                                    :data-toggle "collapse"
+                                                    :data-target "#collapseChain"}
+          "Chain"]] 
+        [:div#collapseChain.collapse.show {:data-parent "#chain-drawer"}
+         [:div.card-body
+          [:div.mb-3 "Epoch: " [:a {:href (str "https://" network-prefix "beaconcha.in/epoch/" epoch)} epoch] " (slot: " [:a {:href (str "https://" network-prefix "beaconcha.in/block/" slot)} slot] ")"]
+          [:div.mb-3 (str "Slot in epoch: " slot-in-epoch " / " slots-per-epoch)]
+          [:div.mb-3
+           "Progress through slot:"
+           [:div.progress
+            [:div.progress-bar
+             {:style
+              {:width (str (round-to-extremes progress-into-slot) "%")}}]]]
+          [:div.mb-3
+           "Canonical head root: "
+           [:a {:href (str "https://" network-prefix "beaconcha.in/block/" head-root)} (humanize-hex head-root)]]
+          [:div.mb-3 "Justified checkpoint: epoch "
+           [:a {:href (str "https://" network-prefix "beaconcha.in/epoch/" (:epoch justified))} (:epoch justified)]
+           " with root "
+           [:a {:href (str "https://" network-prefix "beaconcha.in/block/" (:root justified))} (-> justified :root humanize-hex)]]
+          [:div "Finalized checkpoint: epoch "
+           [:a {:href (str "https://" network-prefix "beaconcha.in/epoch/" (:epoch finalized))} (:epoch finalized)]
+           " with root "
+           [:a {:href (str "https://" network-prefix "beaconcha.in/block/" (:root finalized))} (-> finalized :root humanize-hex)]]]]]])))
 
 (defn peer-view [index {:keys [name version healthy syncing]}]
   [:tr {:key index}
@@ -112,16 +146,6 @@
          [:tbody
           (map-indexed peer-view peers)]]]]]]))
 
-(defn humanize-hex [hex-str]
-  (str (subs hex-str 2 6)
-       ".."
-       (subs hex-str (- (count hex-str) 4))))
-
-(defn network->beaconchain-prefix [network]
-  (case network
-    "mainnet" ""
-    (str network ".")))
-
 (defn head-view [network index {:keys [name slot root is-majority?]}]
   [:tr {:class (if is-majority? :table-success :table-danger)
         :key index}
@@ -158,8 +182,6 @@
     "Block tree over last 4 epochs"]
    [:div.card-body
     [:div#head-count-viewer
-     [:p
-      "Canonical head root: " (get @state :majority-root "")]
      [:p
       [:small
        "NOTE: nodes are labeled with their block root. Percentages are amounts of stake attesting to a block relative to the finalized block."]]
@@ -396,10 +418,12 @@
   (when (not= old new)
     (refresh-fork-choice)))
 
-(defn fetch-heads []
+(defn fetch-monitor-state []
   (go (let [response (<! (http/get "/chain-monitor"
                                    {:with-credentials? false}))
-            heads (:body response)
+            heads (get-in response [:body :nodes])
+            justified (get-in response [:body :justified_checkpoint])
+            finalized (get-in response [:body :finalized_checkpoint])
             [majority-root _] (process-heads-response heads)
             old-root (get @state :majority-root "")]
         ;; NOTE: we block here to give the backend time to compute
@@ -407,14 +431,16 @@
         (go (let [blocking-task (block-for 700)]
               (<! blocking-task)
               (fetch-block-tree-if-new-head old-root majority-root)))
+        (swap! state assoc :justified-checkpoint justified)
+        (swap! state assoc :finalized-checkpoint finalized)
         (swap! state assoc :majority-root majority-root)
         (swap! state assoc :heads (->> heads
                                        (map (partial attach-majority majority-root))
                                        (map attach-name))))))
 
 (defn start-polling-for-heads []
-  (fetch-heads)
-  (let [polling-task (js/setInterval fetch-heads polling-frequency)]
+  (fetch-monitor-state)
+  (let [polling-task (js/setInterval fetch-monitor-state polling-frequency)]
     (swap! state assoc :polling-task polling-task)))
 
 

@@ -23,12 +23,14 @@ type Monitor struct {
 	currentForkChoiceProvider *Node
 	forkchoiceLock            sync.Mutex
 
+	justifiedCheckpoint Checkpoint
+	finalizedCheckpoint Checkpoint
+
 	errc chan error
 }
 
 func (m *Monitor) fetchHeads() error {
 	var wg sync.WaitGroup
-
 	lastBlockTreeHead := HeadRef{}
 	for _, node := range m.nodes {
 		wg.Add(1)
@@ -50,6 +52,16 @@ func (m *Monitor) fetchHeads() error {
 				if err != nil {
 					log.Println(err)
 				}
+			}()
+			go func() {
+				justified, finalized, err := m.currentForkChoiceProvider.fetchFinalityCheckpoints()
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				m.justifiedCheckpoint = justified
+				m.finalizedCheckpoint = finalized
 			}()
 		}
 	}
@@ -118,8 +130,14 @@ type nodeResp struct {
 	Syncing *bool `json:"syncing"`
 }
 
-func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
-	var resp []nodeResp
+type monitorResp struct {
+	Nodes []nodeResp `json:"nodes"`
+	Justified Checkpoint `json:"justified_checkpoint"`
+	Finalized Checkpoint `json:"finalized_checkpoint"`
+}
+
+func (m *Monitor) sendMonitorState(w http.ResponseWriter, r *http.Request) {
+	var nodes []nodeResp
 	for _, node := range m.nodes {
 		response := nodeResp{
 			ID:      node.id,
@@ -135,14 +153,20 @@ func (m *Monitor) sendHeads(w http.ResponseWriter, r *http.Request) {
 		if isNimbus(response.Version) {
 			response.Syncing = nil
 		}
-		resp = append(resp, response)
+		nodes = append(nodes, response)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	resp := monitorResp{
+		Nodes: nodes,
+		Justified: m.justifiedCheckpoint,
+		Finalized: m.finalizedCheckpoint,
+	}
+
 	enc := json.NewEncoder(w)
-	err := enc.Encode(resp)
+	err := enc.Encode(&resp)
 	if err != nil {
 		log.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -232,7 +256,7 @@ var cssFile = regexp.MustCompile(".css$")
 func (m *Monitor) serveAPI() {
 	http.HandleFunc("/spec", m.sendSpec)
 
-	http.HandleFunc("/chain-monitor", m.sendHeads)
+	http.HandleFunc("/chain-monitor", m.sendMonitorState)
 
 	http.HandleFunc("/fork-choice", m.sendForkChoice)
 
@@ -307,6 +331,13 @@ func FromConfig(config *Config) *Monitor {
 		if err != nil {
 			log.Println(err)
 			forkChoiceProvider = nil
+		}
+		justified, finalized, err := m.currentForkChoiceProvider.fetchFinalityCheckpoints()
+		if err != nil {
+			log.Println(err)
+		} else {
+			m.justifiedCheckpoint = justified
+			m.finalizedCheckpoint = finalized
 		}
 	}
 
