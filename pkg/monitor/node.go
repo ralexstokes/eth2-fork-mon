@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -384,6 +385,12 @@ func (n *Node) doFetchParticipation(epoch int) (current Participation, previous 
 	if err != nil {
 		return
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		err = errors.New("participation fetch failed")
+		return
+	}
+
 	defer resp.Body.Close()
 	data := make(map[string]interface{})
 	dec := json.NewDecoder(resp.Body)
