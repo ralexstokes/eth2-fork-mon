@@ -20,6 +20,7 @@ const clientVersionPath = "/eth/v1/node/version"
 const nodeIdentityPath = "/eth/v1/node/identity"
 const nodeSyncingPath = "/eth/v1/node/syncing"
 const finalityCheckpointsPath = "/eth/v1/beacon/states/head/finality_checkpoints"
+const participationPathFmt = "/lighthouse/validator_inclusion/%d/global"
 
 type HeadRef struct {
 	slot string
@@ -350,7 +351,7 @@ func (n *Node) fetchProtoArray() ([]ProtoArrayNode, error) {
 
 type Checkpoint struct {
 	Epoch string `json:"epoch"`
-	Root string `json:"root"`
+	Root  string `json:"root"`
 }
 
 func (n *Node) fetchFinalityCheckpoints() (justified Checkpoint, finalized Checkpoint, err error) {
@@ -374,5 +375,41 @@ func (n *Node) fetchFinalityCheckpoints() (justified Checkpoint, finalized Check
 	finalizedData := finalityData["finalized"].(map[string]interface{})
 	finalized.Epoch = finalizedData["epoch"].(string)
 	finalized.Root = finalizedData["root"].(string)
+	return
+}
+
+func (n *Node) doFetchParticipation(epoch int) (current Participation, previous Participation, err error) {
+	url := n.endpoint + fmt.Sprintf(participationPathFmt, epoch)
+	resp, err := n.client.Get(url)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	data := make(map[string]interface{})
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&data)
+	if err != nil {
+		return
+	}
+
+	participationData := data["data"].(map[string]interface{})
+	currentEpochActiveGwei := participationData["current_epoch_active_gwei"].(float64)
+	previousEpochActiveGwei := participationData["previous_epoch_active_gwei"].(float64)
+	currentEpochAttestingGwei := participationData["current_epoch_attesting_gwei"].(float64)
+	currentEpochTargetAttestingGwei := participationData["current_epoch_target_attesting_gwei"].(float64)
+	previousEpochAttestingGwei := participationData["previous_epoch_attesting_gwei"].(float64)
+	previousEpochTargetAttestingGwei := participationData["previous_epoch_target_attesting_gwei"].(float64)
+	previousEpochHeadAttestingGwei := participationData["previous_epoch_head_attesting_gwei"].(float64)
+
+	current.Epoch = epoch
+	current.ParticipationRate = currentEpochAttestingGwei / currentEpochActiveGwei * 100
+	current.JustificationRate = currentEpochTargetAttestingGwei / currentEpochActiveGwei * 100
+
+	previous.Epoch = epoch - 1
+	previous.ParticipationRate = previousEpochAttestingGwei / previousEpochActiveGwei * 100
+	previous.JustificationRate = previousEpochTargetAttestingGwei / previousEpochActiveGwei * 100
+	headRate := previousEpochHeadAttestingGwei / previousEpochActiveGwei * 100
+	previous.HeadRate = &headRate
+
 	return
 }

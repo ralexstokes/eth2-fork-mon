@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 const headHeaderPath = "/eth/v1/beacon/headers/head"
 const protoArrayPath = "/lighthouse/proto_array"
 const pollingDuration = 1 * time.Second
+const participationEntriesCount = 4
 
 type Monitor struct {
 	config *Config
@@ -22,6 +24,10 @@ type Monitor struct {
 	forkChoiceSummary         *ForkChoiceNode
 	currentForkChoiceProvider *Node
 	forkchoiceLock            sync.Mutex
+
+	participation                []Participation
+	currentParticipationProvider *Node
+	participationLock            sync.Mutex
 
 	justifiedCheckpoint Checkpoint
 	finalizedCheckpoint Checkpoint
@@ -108,6 +114,40 @@ func (m *Monitor) buildLatestForkChoiceSummary() error {
 	return nil
 }
 
+// fetchLatestParticipation gets the participation data for the current complete epoch
+// NOTE: it is expensive to ask for historical data so we keep a cache of entries for the frontend
+func (m *Monitor) fetchLatestParticipation() error {
+	currentSlot := computeCurrentSlot(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot)
+	currentEpoch := int(currentSlot / m.config.Eth2.SlotsPerEpoch)
+	// provider only has data for the `targetEpoch` at the latest
+	targetEpoch := currentEpoch - 1
+	provider := m.currentParticipationProvider
+	currentParticipation, previousParticipation, err := provider.doFetchParticipation(targetEpoch)
+	if err != nil {
+		return err
+	}
+	m.participationLock.Lock()
+	data := m.participation
+	if len(data) != 0 {
+		if data[len(data)-1].Epoch == previousParticipation.Epoch {
+			data[len(data)-1] = previousParticipation
+		} else {
+			data = append(data, previousParticipation)
+		}
+	} else {
+		data = append(data, previousParticipation)
+	}
+	data = append(data, currentParticipation)
+
+	if len(data) > participationEntriesCount {
+		data = data[1:]
+	}
+
+	m.participation = data
+	m.participationLock.Unlock()
+	return nil
+}
+
 func (m *Monitor) sendSpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -127,11 +167,11 @@ type nodeResp struct {
 	Slot    string `json:"slot"`
 	Root    string `json:"root"`
 	Healthy bool   `json:"healthy"`
-	Syncing *bool `json:"syncing"`
+	Syncing *bool  `json:"syncing"`
 }
 
 type monitorResp struct {
-	Nodes []nodeResp `json:"nodes"`
+	Nodes     []nodeResp `json:"nodes"`
 	Justified Checkpoint `json:"justified_checkpoint"`
 	Finalized Checkpoint `json:"finalized_checkpoint"`
 }
@@ -160,7 +200,7 @@ func (m *Monitor) sendMonitorState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	resp := monitorResp{
-		Nodes: nodes,
+		Nodes:     nodes,
 		Justified: m.justifiedCheckpoint,
 		Finalized: m.finalizedCheckpoint,
 	}
@@ -251,6 +291,41 @@ func (m *Monitor) sendForkChoice(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type Participation struct {
+	Epoch             int      `json:"epoch"`
+	ParticipationRate float64  `json:"participation_rate"`
+	JustificationRate float64  `json:"justification_rate"`
+	HeadRate          *float64 `json:"head_rate"`
+}
+
+type participationResponse struct {
+	Data []Participation `json:"data"`
+}
+
+func (m *Monitor) sendParticipationData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	m.participationLock.Lock()
+	data := make([]Participation, len(m.participation))
+	copy(data, m.participation)
+	m.participationLock.Unlock()
+
+	sort.Slice(data, func(i, j int) bool { return data[i].Epoch > data[j].Epoch })
+
+	resp := participationResponse{
+		Data: data,
+	}
+
+	enc := json.NewEncoder(w)
+	err := enc.Encode(resp)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
 var cssFile = regexp.MustCompile(".css$")
 
 func (m *Monitor) serveAPI() {
@@ -259,6 +334,8 @@ func (m *Monitor) serveAPI() {
 	http.HandleFunc("/chain-monitor", m.sendMonitorState)
 
 	http.HandleFunc("/fork-choice", m.sendForkChoice)
+
+	http.HandleFunc("/participation", m.sendParticipationData)
 
 	clientServer := http.FileServer(http.Dir(m.config.OutputDir))
 	clientServerWithMimeType := func(w http.ResponseWriter, r *http.Request) {
@@ -274,8 +351,7 @@ func (m *Monitor) serveAPI() {
 }
 
 func waitUntilNextSlot(genesisTime int, secondsPerSlot int) {
-	now := time.Now().Unix()
-	currentSlot := int((int(now) - genesisTime) / secondsPerSlot)
+	currentSlot := computeCurrentSlot(genesisTime, secondsPerSlot)
 	nextSlot := currentSlot + 1
 	nextSlotInSeconds := nextSlot * secondsPerSlot
 	nextSlotStart := nextSlotInSeconds + genesisTime
@@ -285,6 +361,38 @@ func waitUntilNextSlot(genesisTime int, secondsPerSlot int) {
 	time.Sleep(time.Duration(duration) * time.Second)
 }
 
+func waitUntilNextEpoch(genesisTime int, secondsPerSlot int, slotsPerEpoch int) {
+	currentSlot := computeCurrentSlot(genesisTime, secondsPerSlot)
+	currentEpoch := int(currentSlot / slotsPerEpoch)
+	nextEpoch := currentEpoch + 1
+	nextEpochInSeconds := nextEpoch * slotsPerEpoch * secondsPerSlot
+	nextSlotStart := nextEpochInSeconds + genesisTime
+
+	duration := nextSlotStart - int(time.Now().Unix())
+
+	time.Sleep(time.Duration(duration) * time.Second)
+}
+
+func (m *Monitor) startParticipationPoll() {
+	err := m.fetchLatestParticipation()
+	if err != nil {
+		m.errc <- err
+		return
+	}
+
+	config := m.config.Eth2
+	secondsPerEpoch := config.SecondsPerSlot * config.SlotsPerEpoch
+	for {
+		time.Sleep(time.Duration(secondsPerEpoch) * time.Second)
+
+		err := m.fetchLatestParticipation()
+		if err != nil {
+			m.errc <- err
+			return
+		}
+	}
+}
+
 func (m *Monitor) Start() error {
 	go func() {
 		log.Println("synchronizing to next slot")
@@ -292,6 +400,14 @@ func (m *Monitor) Start() error {
 		log.Println("aligned to slot, continuting")
 		m.startHeadMonitor()
 	}()
+	if m.currentForkChoiceProvider != nil {
+		go func() {
+			log.Println("waiting for next epoch to poll for participation data")
+			waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
+			log.Println("aligned to epoch, continuing")
+			m.startParticipationPoll()
+		}()
+	}
 	return nil
 }
 
@@ -303,6 +419,7 @@ func (m *Monitor) Serve() error {
 func FromConfig(config *Config) *Monitor {
 	var nodes []*Node
 	var forkChoiceProvider *Node
+	var participationProvider *Node
 	for _, endpoint := range config.Endpoints {
 		node, err := nodeAtEndpoint(endpoint)
 		if err != nil {
@@ -318,13 +435,14 @@ func FromConfig(config *Config) *Monitor {
 		node.isHealthy = true
 		if strings.Contains(node.version, "Lighthouse") {
 			forkChoiceProvider = node
+			participationProvider = node
 		}
 		nodes = append(nodes, node)
 	}
 
-	m := &Monitor{config: config, nodes: nodes, currentForkChoiceProvider: forkChoiceProvider, errc: make(chan error)}
+	m := &Monitor{config: config, nodes: nodes, currentForkChoiceProvider: forkChoiceProvider, currentParticipationProvider: participationProvider, errc: make(chan error)}
 
-	if forkChoiceProvider == nil {
+	if m.currentForkChoiceProvider == nil {
 		log.Println("warn: no lighthouse node provided so fork choice endpoint will be empty (requires lighthouse protoarray)")
 	} else {
 		err := m.buildLatestForkChoiceSummary()
@@ -338,6 +456,16 @@ func FromConfig(config *Config) *Monitor {
 		} else {
 			m.justifiedCheckpoint = justified
 			m.finalizedCheckpoint = finalized
+		}
+	}
+
+	if m.currentParticipationProvider == nil {
+		log.Println("warn: no lighthouse node provided so participation endpoint will be empty (requires lighthouse protoarray)")
+	} else {
+		err := m.fetchLatestParticipation()
+		if err != nil {
+			log.Println(err)
+			participationProvider = nil
 		}
 	}
 
