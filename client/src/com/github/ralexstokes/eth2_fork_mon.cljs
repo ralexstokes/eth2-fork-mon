@@ -9,9 +9,16 @@
    [cljs-http.client :as http]
    [cljs.core.async :refer [<! chan close!]]))
 
+(goog-define DEV-MODE true)
+
 (def debug-mode? false)
 (def polling-frequency 700) ;; ms
 (def slot-clock-refresh-frequency 100) ;; ms
+
+(defn url-with [path]
+  (if DEV-MODE
+    (str "http://localhost:8080" path)
+    path))
 
 (defn put! [& objs]
   (doseq [obj objs]
@@ -53,7 +60,8 @@
 
 (defonce state (r/atom {:network ""
                         :justified-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
-                        :finalized-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}}))
+                        :finalized-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
+                        :participation-data []}))
 
 (defn render-edn [data]
   [:pre
@@ -187,6 +195,58 @@
        "NOTE: nodes are labeled with their block root. Percentages are amounts of stake attesting to a block relative to the finalized block."]]
      [:div#fork-choice.svg-container]]]])
 
+(defn parse-rate [rate]
+  (some-> rate
+          js/parseFloat
+          (.toFixed 2)))
+
+(defn participation-view-for-epoch [index {:keys [epoch participation_rate justification_rate head_rate]}]
+  (let [participation-rate (parse-rate participation_rate)
+        justification-rate (parse-rate justification_rate)
+        head-rate (parse-rate head_rate)]
+  [:tr {:key index
+        :class (if (>= justification-rate 66.6)
+                 :table-warning
+                 "")}
+   [:th {:scope :row} (str "epoch " epoch)]
+   [:td (str participation-rate "%")]
+   [:td (str justification-rate "%")]
+   [:td (if head-rate (str head-rate "%") "pending")]]))
+
+(defn participation-view []
+  [:div#participation-view.card
+   [:div.card-header
+    "Participation metrics"]
+   [:div.card-body
+    [:div.card.bg-light
+     [:div.card-header
+      [:button.btn.btn-link {:data-toggle "collapse"
+                             :data-target "#collapseParticipationLegend"}
+       "Info"]]
+     [:div#collapseParticipationLegend.collapse.show {:data-parent "#participation-view"}
+     [:div.card-body
+      [:p "Participation rate is percent of active stake that got an attestation on-chain."]
+      [:p "Justification rate is percent of active stake that attested to the correct target. If this number is greater than 2/3, then the epoch is justified and colored golden."]
+      [:p "Head rate is the precent of active validators who attested to the correct head."]]]]
+    [:table.table.table-hover
+     [:thead
+      [:tr
+       [:th {:scope :col} "Epoch"]
+       [:th {:scope :col} "Participation rate"]
+       [:th {:scope :col} "Justification rate"]
+       [:th {:scope :col} "Head rate"]]]
+     [:tbody
+      (map-indexed #(participation-view-for-epoch %1 %2) (:participation-data @state))]]]])
+
+(defn validator-info-view []
+  [:div.card
+   [:div.card-header
+    "Validator metrics (coming soon!)"]
+   [:div.card-body
+    [:p "total eth deposited"]
+    [:p "length of activation queue"]
+    [:p "length of exit queue"]]])
+
 (defn container-row
   "layout for a 'widget'"
   [component]
@@ -203,10 +263,17 @@
     [:ul.nav.nav-pills.mr-auto
      [:li.nav-item
       [:a.nav-link.active {:data-toggle :tab
-                           :href "#nav-tip-monitor"} "chain monitor"]]
+                           :href "#nav-tip-monitor"} "node monitor"]]
      [:li.nav-item
       [:a.nav-link {:data-toggle :tab
-                    :href "#nav-block-tree"} "block tree"]]]
+                    :href "#nav-block-tree"} "block tree"]]
+     [:li.nav-item
+      [:a.nav-link {:data-toggle :tab
+                    :href "#nav-participation"} "participation"]]
+     ;; [:li.nav-item
+     ;;  [:a.nav-link {:data-toggle :tab
+     ;;                :href "#nav-validator-info"} "validator info"]]
+                    ]
     [:div.ml-auto
      [:span.navbar-text (str "network: " (:network @state))]]]
    [:div.tab-content
@@ -220,6 +287,12 @@
     [:div#nav-block-tree.tab-pane.fade.show
      (container-row
       (tree-view))]
+    [:div#nav-participation.tab-pane.fade.show
+     (container-row
+      (participation-view))]
+    ;; [:div#nav-validator-info.tab-pane.fade.show
+    ;;  (container-row
+    ;;   (validator-info-view))]
     (when debug-mode?
       (container-row
        (debug-view)))]])
@@ -230,7 +303,7 @@
 (defn ^:after-load re-render [] (mount))
 
 (defn fetch-spec-from-server []
-  (http/get "/spec" {:with-credentials? false}))
+  (http/get (url-with "/spec") {:with-credentials? false}))
 
 (defn process-heads-response [heads]
   (->> heads
@@ -402,7 +475,7 @@
 
 
 (defn refresh-fork-choice []
-  (go (let [response (<! (http/get "/fork-choice"
+  (go (let [response (<! (http/get (url-with "/fork-choice")
                                    {:with-credentials? false}))
             block-tree (get-in response [:body :block_tree])
             total-weight (:weight block-tree)
@@ -419,7 +492,7 @@
     (refresh-fork-choice)))
 
 (defn fetch-monitor-state []
-  (go (let [response (<! (http/get "/chain-monitor"
+  (go (let [response (<! (http/get (url-with "/chain-monitor")
                                    {:with-credentials? false}))
             heads (get-in response [:body :nodes])
             justified (get-in response [:body :justified_checkpoint])
@@ -443,16 +516,33 @@
   (let [polling-task (js/setInterval fetch-monitor-state polling-frequency)]
     (swap! state assoc :polling-task polling-task)))
 
+(defn fetch-participation-data []
+  (go
+    ;; NOTE: races update on server...
+    ;; for now just delay a bit
+    (let [blocking-task (block-for 1000)]
+      (<! blocking-task)
+    (let [response (<! (http/get (url-with "/participation")
+                                   {:with-credentials? false}))
+            data (get-in response [:body :data])]
+        (swap! state assoc :participation-data data)))))
 
-(defn update-slot-clock []
-  (let [eth2-spec (:eth2-spec @state)
-        genesis-time (:genesis_time eth2-spec)
+(defn compute-slot-clock [eth2-spec]
+  (let [genesis-time (:genesis_time eth2-spec)
         seconds-per-slot (:seconds_per_slot eth2-spec)
         slots-per-epoch (:slots_per_epoch eth2-spec)]
-    (swap! state assoc :slot-clock (calculate-eth2-time genesis-time seconds-per-slot slots-per-epoch))))
+  (calculate-eth2-time genesis-time seconds-per-slot slots-per-epoch)))
+
+(defn update-slot-clock [eth2-spec]
+  (let [old-epoch (get-in @state [:slot-clock :epoch])
+        new-clock (compute-slot-clock eth2-spec)
+        new-epoch (:epoch new-clock)]
+    (when (> new-epoch old-epoch)
+      (fetch-participation-data))
+    (swap! state assoc :slot-clock new-clock)))
 
 (defn start-slot-clock []
-  (let [timer-task (js/setInterval update-slot-clock slot-clock-refresh-frequency)]
+  (let [timer-task (js/setInterval #(update-slot-clock (:eth2-spec @state)) slot-clock-refresh-frequency)]
     (swap! state assoc :timer-task timer-task)))
 
 (defn push-hash [e]
@@ -469,17 +559,20 @@
           (.tab "show")))))
 
 (defn start-viz []
-  (go (let [spec-response (fetch-spec-from-server)
-            spec (:body (<! spec-response))]
-        (swap! state assoc :eth2-spec spec)
-        (swap! state assoc :network (:network spec))
-        (mount)
-        (install-navigation)
-        (start-slot-clock)
-        (start-polling-for-heads)
-        (refresh-fork-choice)
-        (restore-last-navigation)
-        )))
+  (go
+    ;; NOTE: block here on critical data like the network spec
+    (let [spec-response (fetch-spec-from-server)
+          spec (:body (<! spec-response))]
+      (swap! state assoc :eth2-spec spec)
+      (swap! state assoc :network (:network spec))
+      (swap! state assoc :slot-clock (compute-slot-clock spec))
+      (fetch-participation-data)
+      (mount)
+      (install-navigation)
+      (start-slot-clock)
+      (start-polling-for-heads)
+      (refresh-fork-choice)
+      (restore-last-navigation))))
 
 (defonce init
   (start-viz))

@@ -15,7 +15,7 @@ import (
 const headHeaderPath = "/eth/v1/beacon/headers/head"
 const protoArrayPath = "/lighthouse/proto_array"
 const pollingDuration = 1 * time.Second
-const participationEntriesCount = 4
+const participationEntriesCount = 20
 
 type Monitor struct {
 	config *Config

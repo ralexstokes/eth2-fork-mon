@@ -1,0 +1,2 @@
+{:main com.github.ralexstokes.eth2-fork-mon
+ :closure-defines {com.github.ralexstokes.eth2-fork-mon/DEV-MODE false}}
