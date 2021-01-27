@@ -5,3 +5,4 @@ out
 client/target
 public
 main
+client/.rebel_readline_history
