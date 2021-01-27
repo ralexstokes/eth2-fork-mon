@@ -7,3 +7,4 @@ public
 main
 client/.rebel_readline_history
 client/.nrepl-port
+client/.calva/output-window/output.calva-repl
