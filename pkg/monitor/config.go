@@ -8,7 +8,9 @@ type Eth2Config struct {
 }
 
 type Config struct {
-	Endpoints []string
-	Eth2      Eth2Config
-	OutputDir string
+	Endpoints           []string
+	Eth2                Eth2Config
+	OutputDir           string
+	EtherscanAPIKey     string `yaml:"etherscan_api_key"`
+	MillisecondsTimeout int    `yaml:"http_timeout_milliseconds"`
 }

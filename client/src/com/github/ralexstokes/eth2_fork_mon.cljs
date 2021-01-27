@@ -239,13 +239,12 @@
       (map-indexed #(participation-view-for-epoch %1 %2) (:participation-data @state))]]]])
 
 (defn validator-info-view []
+  (let [balance (get-in @state [:deposit-contract :balance])]
   [:div.card
    [:div.card-header
-    "Validator metrics (coming soon!)"]
+    "Validator metrics"]
    [:div.card-body
-    [:p "total eth deposited"]
-    [:p "length of activation queue"]
-    [:p "length of exit queue"]]])
+    [:p "Balance in deposit contract: " (.toLocaleString balance) " ETH"]]]))
 
 (defn container-row
   "layout for a 'widget'"
@@ -270,10 +269,9 @@
      [:li.nav-item
       [:a.nav-link {:data-toggle :tab
                     :href "#nav-participation"} "participation"]]
-     ;; [:li.nav-item
-     ;;  [:a.nav-link {:data-toggle :tab
-     ;;                :href "#nav-validator-info"} "validator info"]]
-                    ]
+     [:li.nav-item
+      [:a.nav-link {:data-toggle :tab
+                    :href "#nav-validator-info"} "validator info"]]]
     [:div.ml-auto
      [:span.navbar-text (str "network: " (:network @state))]]]
    [:div.tab-content
@@ -290,9 +288,9 @@
     [:div#nav-participation.tab-pane.fade.show
      (container-row
       (participation-view))]
-    ;; [:div#nav-validator-info.tab-pane.fade.show
-    ;;  (container-row
-    ;;   (validator-info-view))]
+    [:div#nav-validator-info.tab-pane.fade.show
+     (container-row
+      (validator-info-view))]
     (when debug-mode?
       (container-row
        (debug-view)))]])
@@ -523,9 +521,22 @@
     (let [blocking-task (block-for 1000)]
       (<! blocking-task)
     (let [response (<! (http/get (url-with "/participation")
-                                   {:with-credentials? false}))
+                                 {:with-credentials? false}))
             data (get-in response [:body :data])]
         (swap! state assoc :participation-data data)))))
+
+(defn fetch-deposit-contract-data []
+  (go
+    (let [response (<!
+                    (http/get
+                     (url-with "/deposit-contract")
+                     {:with-credentials? false}))
+          balance (get-in response [:body :balance])]
+      (swap! state assoc :deposit-contract {:balance balance}))))
+
+(defn start-polling-for-deposit-contract-data []
+  (let [deposit-contract-polling-task (js/setInterval fetch-deposit-contract-data (* 3600 1000))]
+    (swap! state assoc :deposit-contract-polling-task deposit-contract-polling-task)))
 
 (defn compute-slot-clock [eth2-spec]
   (let [genesis-time (:genesis_time eth2-spec)
@@ -567,10 +578,12 @@
       (swap! state assoc :network (:network spec))
       (swap! state assoc :slot-clock (compute-slot-clock spec))
       (fetch-participation-data)
+      (fetch-deposit-contract-data)
       (mount)
       (install-navigation)
       (start-slot-clock)
       (start-polling-for-heads)
+      (start-polling-for-deposit-contract-data)
       (refresh-fork-choice)
       (restore-last-navigation))))
 

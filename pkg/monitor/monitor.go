@@ -2,7 +2,9 @@ package monitor
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -31,6 +33,8 @@ type Monitor struct {
 
 	justifiedCheckpoint Checkpoint
 	finalizedCheckpoint Checkpoint
+
+	depositContractBalance int
 
 	errc chan error
 }
@@ -326,6 +330,23 @@ func (m *Monitor) sendParticipationData(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func (m *Monitor) sendDepositContractData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	resp := make(map[string]int)
+
+	resp["balance"] = m.depositContractBalance
+
+	enc := json.NewEncoder(w)
+	err := enc.Encode(resp)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
 var cssFile = regexp.MustCompile(".css$")
 
 func (m *Monitor) serveAPI() {
@@ -336,6 +357,8 @@ func (m *Monitor) serveAPI() {
 	http.HandleFunc("/fork-choice", m.sendForkChoice)
 
 	http.HandleFunc("/participation", m.sendParticipationData)
+
+	http.HandleFunc("/deposit-contract", m.sendDepositContractData)
 
 	clientServer := http.FileServer(http.Dir(m.config.OutputDir))
 	clientServerWithMimeType := func(w http.ResponseWriter, r *http.Request) {
@@ -393,6 +416,46 @@ func (m *Monitor) startParticipationPoll() {
 	}
 }
 
+const depositContractBalanceURLFmt = "https://api.etherscan.io/api?module=account&action=balance&address=0x00000000219ab540356cBB839Cbe05303d7705Fa&tag=latest&apikey=%s"
+
+func (m *Monitor) updateDepositContractBalance() {
+	url := fmt.Sprintf(depositContractBalanceURLFmt, m.config.EtherscanAPIKey)
+	resp, err := http.Get(url)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	data := make(map[string]interface{})
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&data)
+	if err != nil {
+		return
+	}
+
+	balanceData, ok := data["result"].(string)
+	if !ok {
+		return
+	}
+
+	balance, err := strconv.ParseFloat(balanceData, 64)
+	if err != nil {
+		return
+	}
+
+	roundedBalance := int(balance / math.Pow(10, 18))
+
+	m.depositContractBalance = roundedBalance
+}
+
+func (m *Monitor) startDepositContractMonitor() {
+	m.updateDepositContractBalance()
+	for {
+		time.Sleep(30 * time.Minute)
+
+		m.updateDepositContractBalance()
+	}
+}
+
 func (m *Monitor) Start() error {
 	go func() {
 		log.Println("synchronizing to next slot")
@@ -408,6 +471,9 @@ func (m *Monitor) Start() error {
 			m.startParticipationPoll()
 		}()
 	}
+	if m.config.EtherscanAPIKey != "" {
+		go m.startDepositContractMonitor()
+	}
 	return nil
 }
 
@@ -421,7 +487,7 @@ func FromConfig(config *Config) *Monitor {
 	var forkChoiceProvider *Node
 	var participationProvider *Node
 	for _, endpoint := range config.Endpoints {
-		node, err := nodeAtEndpoint(endpoint)
+		node, err := nodeAtEndpoint(endpoint, time.Duration(config.MillisecondsTimeout))
 		if err != nil {
 			log.Println(err)
 			continue

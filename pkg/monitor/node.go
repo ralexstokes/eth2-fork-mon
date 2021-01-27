@@ -42,12 +42,12 @@ func idHashOf(peerID string) string {
 	return hex.EncodeToString(digest)[:8]
 }
 
-func nodeAtEndpoint(endpoint string) (*Node, error) {
+func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error) {
 	n := &Node{endpoint: endpoint}
 
 	// set timeout for all HTTP requests...
 	// in particular, Prysm endpoint can be slow...
-	n.client.Timeout = 800 * time.Millisecond
+	n.client.Timeout = msHTTPTimeout * time.Millisecond
 
 	resp, err := n.client.Get(endpoint + clientVersionPath)
 	if err != nil {
