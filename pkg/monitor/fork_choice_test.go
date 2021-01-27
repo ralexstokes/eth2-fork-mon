@@ -3,17 +3,9 @@ package monitor
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"reflect"
 	"testing"
 )
-
-func TestHumanizeRoot(t *testing.T) {
-	root := fmt.Sprintf("0x%s", hash("a"))
-	if humanizeRoot(root) != "ca97..48bb" {
-		t.Error("humanize root is broken")
-	}
-}
 
 func hash(input string) string {
 	h := sha256.New()
