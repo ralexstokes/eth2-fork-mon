@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -19,6 +20,13 @@ const protoArrayPath = "/lighthouse/proto_array"
 const pollingDuration = 1 * time.Second
 const participationEntriesCount = 20
 
+type WeakSubjectivityData struct {
+	CurrentEpoch int    `json:"current_epoch"`
+	IsSafe       bool   `json:"is_safe"`
+	Checkpoint   string `json:"ws_checkpoint"`
+	WSPeriod     int    `json:"ws_period"`
+}
+
 type Monitor struct {
 	config *Config
 	nodes  []*Node
@@ -35,6 +43,9 @@ type Monitor struct {
 	finalizedCheckpoint Checkpoint
 
 	depositContractBalance int
+
+	weakSubjectivityData WeakSubjectivityData
+	weakSubjectivityLock sync.Mutex
 
 	errc chan error
 }
@@ -347,6 +358,23 @@ func (m *Monitor) sendDepositContractData(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (m *Monitor) sendWSData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	m.weakSubjectivityLock.Lock()
+	data := m.weakSubjectivityData
+	m.weakSubjectivityLock.Unlock()
+
+	enc := json.NewEncoder(w)
+	err := enc.Encode(&data)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
 var cssFile = regexp.MustCompile(".css$")
 
 func (m *Monitor) serveAPI() {
@@ -359,6 +387,8 @@ func (m *Monitor) serveAPI() {
 	http.HandleFunc("/participation", m.sendParticipationData)
 
 	http.HandleFunc("/deposit-contract", m.sendDepositContractData)
+
+	http.HandleFunc("/ws-data", m.sendWSData)
 
 	clientServer := http.FileServer(http.Dir(m.config.OutputDir))
 	clientServerWithMimeType := func(w http.ResponseWriter, r *http.Request) {
@@ -456,6 +486,51 @@ func (m *Monitor) startDepositContractMonitor() {
 	}
 }
 
+func (m *Monitor) getCurrentEpoch() int {
+	currentSlot := computeCurrentSlot(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot)
+	return int(currentSlot / m.config.Eth2.SlotsPerEpoch)
+}
+
+func (m *Monitor) updateWSData() error {
+	endpoint := m.config.WSProviderEndpoint
+	resp, err := http.Get(endpoint)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	data := WeakSubjectivityData{}
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&data)
+	if err != nil {
+		return err
+	}
+
+	if data.CurrentEpoch != m.getCurrentEpoch() {
+		return errors.New("wrong epoch from ws provider...")
+	}
+
+	m.weakSubjectivityLock.Lock()
+	m.weakSubjectivityData = data
+	m.weakSubjectivityLock.Unlock()
+	return nil
+}
+
+func (m *Monitor) startWSProviderMonitor() {
+	err := m.updateWSData()
+	if err != nil {
+		log.Println(err)
+	}
+	for {
+		waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
+
+		err = m.updateWSData()
+		if err != nil {
+			log.Println(err)
+		}
+	}
+}
+
 func (m *Monitor) Start() error {
 	go func() {
 		log.Println("synchronizing to next slot")
@@ -463,18 +538,29 @@ func (m *Monitor) Start() error {
 		log.Println("aligned to slot, continuting")
 		m.startHeadMonitor()
 	}()
-	if m.currentForkChoiceProvider != nil {
-		go func() {
+	go func() {
+		if m.currentForkChoiceProvider != nil {
 			log.Println("waiting for next epoch to poll for participation data")
 			waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
 			log.Println("aligned to epoch, continuing")
 			m.startParticipationPoll()
-		}()
-	}
-	if m.config.EtherscanAPIKey != "" {
-		log.Println("starting deposit contract monitor")
-		go m.startDepositContractMonitor()
-	}
+		}
+	}()
+	go func() {
+		if m.config.EtherscanAPIKey != "" {
+			log.Println("starting deposit contract monitor")
+			m.startDepositContractMonitor()
+		}
+	}()
+	go func() {
+		if m.config.WSProviderEndpoint != "" {
+			log.Println("waiting for next epoch to poll for ws data")
+			waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
+			log.Println("aligned to epoch, continuing")
+			log.Println("starting weak subjectivity provider monitor")
+			m.startWSProviderMonitor()
+		}
+	}()
 	return nil
 }
 

@@ -13,4 +13,5 @@ type Config struct {
 	OutputDir           string
 	EtherscanAPIKey     string `yaml:"etherscan_api_key"`
 	MillisecondsTimeout int    `yaml:"http_timeout_milliseconds"`
+	WSProviderEndpoint  string `yaml:"weak_subjectivity_provider_endpoint"`
 }
