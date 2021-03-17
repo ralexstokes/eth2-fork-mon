@@ -472,6 +472,7 @@ func (m *Monitor) Start() error {
 		}()
 	}
 	if m.config.EtherscanAPIKey != "" {
+		log.Println("starting deposit contract monitor")
 		go m.startDepositContractMonitor()
 	}
 	return nil

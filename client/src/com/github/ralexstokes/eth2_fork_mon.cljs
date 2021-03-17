@@ -61,7 +61,8 @@
 (defonce state (r/atom {:network ""
                         :justified-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
                         :finalized-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
-                        :participation-data []}))
+                        :participation-data []
+                        :deposit-contract {:balance nil}}))
 
 (defn render-edn [data]
   [:pre
@@ -94,7 +95,7 @@
          [:button.btn.btn-link.btn-block.text-left {:type :button
                                                     :data-toggle "collapse"
                                                     :data-target "#collapseChain"}
-          "Chain"]] 
+          "Chain"]]
         [:div#collapseChain.collapse.show {:data-parent "#chain-drawer"}
          [:div.card-body
           [:div.mb-3 "Epoch: " [:a {:href (str "https://" network-prefix "beaconcha.in/epoch/" epoch)} epoch] " (slot: " [:a {:href (str "https://" network-prefix "beaconcha.in/block/" slot)} slot] ")"]
@@ -124,12 +125,12 @@
    [:td version]
    [:td {:style {:text-align "center"}}
     (if healthy
-          "🟢"
-          "🔴")]
+      "🟢"
+      "🔴")]
    [:td {:style {:text-align "center"}}
     (if syncing
-          "Yes"
-          "No")]])
+      "Yes"
+      "No")]])
 
 (defn nodes-view []
   (when-let [peers (:heads @state)]
@@ -204,14 +205,14 @@
   (let [participation-rate (parse-rate participation_rate)
         justification-rate (parse-rate justification_rate)
         head-rate (parse-rate head_rate)]
-  [:tr {:key index
-        :class (if (>= justification-rate 66.6)
-                 :table-warning
-                 "")}
-   [:th {:scope :row} (str "epoch " epoch)]
-   [:td (str participation-rate "%")]
-   [:td (str justification-rate "%")]
-   [:td (if head-rate (str head-rate "%") "pending")]]))
+    [:tr {:key index
+          :class (if (>= justification-rate 66.6)
+                   :table-warning
+                   "")}
+     [:th {:scope :row} (str "epoch " epoch)]
+     [:td (str participation-rate "%")]
+     [:td (str justification-rate "%")]
+     [:td (if head-rate (str head-rate "%") "pending")]]))
 
 (defn participation-view []
   [:div#participation-view.card
@@ -224,10 +225,10 @@
                              :data-target "#collapseParticipationLegend"}
        "Info"]]
      [:div#collapseParticipationLegend.collapse.show {:data-parent "#participation-view"}
-     [:div.card-body
-      [:p "Participation rate is percent of active stake that got an attestation on-chain."]
-      [:p "Justification rate is percent of active stake that attested to the correct target. If this number is greater than 2/3, then the epoch is justified and colored golden."]
-      [:p "Head rate is the precent of active validators who attested to the correct head."]]]]
+      [:div.card-body
+       [:p "Participation rate is percent of active stake that got an attestation on-chain."]
+       [:p "Justification rate is percent of active stake that attested to the correct target. If this number is greater than 2/3, then the epoch is justified and colored golden."]
+       [:p "Head rate is the precent of active validators who attested to the correct head."]]]]
     [:table.table.table-hover
      [:thead
       [:tr
@@ -240,11 +241,12 @@
 
 (defn validator-info-view []
   (let [balance (get-in @state [:deposit-contract :balance])]
-  [:div.card
-   [:div.card-header
-    "Validator metrics"]
-   [:div.card-body
-    [:p "Balance in deposit contract: " (.toLocaleString balance) " ETH"]]]))
+    [:div.card
+     [:div.card-header
+      "Validator metrics"]
+     [:div.card-body
+      (when balance
+        [:p "Balance in deposit contract: " (.toLocaleString balance) " ETH"])]]))
 
 (defn container-row
   "layout for a 'widget'"
@@ -377,7 +379,7 @@
            .-data
            .-root
            (subs 2))))
-  
+
 
 (defn draw-tree! [root width total-weight]
   (let [leaves (.leaves root)
@@ -393,29 +395,27 @@
                 (.attr "class" "svg-content-responsive"))
         background (-> svg
                        (.append "g")
-                       (.attr "font-size" 10)
-                       )
+                       (.attr "font-size" 10))
         slot-rects (-> background
                        (.append "g")
                        (.selectAll "g")
                        (.data (clj->js (into [] (range (inc slot-count)))))
                        (.join "g")
-                       (.attr "transform" #(str "translate(0 " (* dy %)")")))
+                       (.attr "transform" #(str "translate(0 " (* dy %) ")")))
         _ (-> slot-rects
-                       (.append "rect")
-                       (.attr "fill" #(compute-fill highest-slot %))
-                       (.attr "x" 0)
-                       (.attr "y" 0)
-                       (.attr "width" "100%")
-                       (.attr "height" dy))
-        _ (-> slot-rects 
-                       (.append "text")
-                       (.attr "text-anchor" "start")
-                       (.attr "y" (* dy 0.5))
-                       (.attr "x" 5)
-                       (.attr "fill" "#6c757d")
-                       (.text #(slot-guide->label highest-slot %))
-                       )
+              (.append "rect")
+              (.attr "fill" #(compute-fill highest-slot %))
+              (.attr "x" 0)
+              (.attr "y" 0)
+              (.attr "width" "100%")
+              (.attr "height" dy))
+        _ (-> slot-rects
+              (.append "text")
+              (.attr "text-anchor" "start")
+              (.attr "y" (* dy 0.5))
+              (.attr "x" 5)
+              (.attr "fill" "#6c757d")
+              (.text #(slot-guide->label highest-slot %)))
         g (-> svg
               (.append "g")
               (.attr "transform"
@@ -431,8 +431,7 @@
                (.join "path")
                (.attr "d" (-> (js/d3.linkVertical)
                               (.x #(.-x %))
-                              (.y #(node->y-offset lowest-slot dy %))
-                              )))
+                              (.y #(node->y-offset lowest-slot dy %)))))
 
         nodes   (-> g
                     (.append "g")
@@ -443,18 +442,17 @@
                     (.append "a")
                     (.attr "href" node->block-explorer-link))
         _ (-> nodes
-                      (.append "circle")
-                      (.attr "fill" compute-node-fill)
-                      (.attr "stroke" compute-node-stroke)
-                      (.attr "stroke-width" 3)
-                      (.attr "r" (* dy 0.2)))
+              (.append "circle")
+              (.attr "fill" compute-node-fill)
+              (.attr "stroke" compute-node-stroke)
+              (.attr "stroke-width" 3)
+              (.attr "r" (* dy 0.2)))
         _ (-> nodes
-                   (.append "text")
-                   (.attr "dx" "1em")
-                   (.attr "transform" "rotate(180)")
-                   (.attr "text-anchor" "start")
-                   (.text (partial node->label total-weight))
-                   )]))
+              (.append "text")
+              (.attr "dx" "1em")
+              (.attr "transform" "rotate(180)")
+              (.attr "text-anchor" "start")
+              (.text (partial node->label total-weight)))]))
 
 (defn render-fork-choice! [root total-weight]
   (let [width (* (.-innerWidth js/window) (/ 9 12))
@@ -520,8 +518,8 @@
     ;; for now just delay a bit
     (let [blocking-task (block-for 1000)]
       (<! blocking-task)
-    (let [response (<! (http/get (url-with "/participation")
-                                 {:with-credentials? false}))
+      (let [response (<! (http/get (url-with "/participation")
+                                   {:with-credentials? false}))
             data (get-in response [:body :data])]
         (swap! state assoc :participation-data data)))))
 
@@ -542,7 +540,7 @@
   (let [genesis-time (:genesis_time eth2-spec)
         seconds-per-slot (:seconds_per_slot eth2-spec)
         slots-per-epoch (:slots_per_epoch eth2-spec)]
-  (calculate-eth2-time genesis-time seconds-per-slot slots-per-epoch)))
+    (calculate-eth2-time genesis-time seconds-per-slot slots-per-epoch)))
 
 (defn update-slot-clock [eth2-spec]
   (let [old-epoch (get-in @state [:slot-clock :epoch])
