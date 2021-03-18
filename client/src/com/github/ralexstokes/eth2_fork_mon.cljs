@@ -587,7 +587,7 @@
     (let [response (<! (http/get (url-with "/ws-data")
                                  {:with-credentials? false}))
           checkpoint (get-in response [:body :ws_checkpoint])]
-      (swap! state assoc :ws-data {:checkpoint "0x565a603b4b96bf0e66238e8f6cbbbad2be43df737e1289f1a9da5ad838c304df:24135"}))))
+      (swap! state assoc :ws-data {:checkpoint checkpoint}))))
 
 (defn refresh-ws-data [{:keys [seconds_per_slot slots_per_epoch]}]
   (let [epoch-in-seconds (* seconds_per_slot slots_per_epoch)
