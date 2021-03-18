@@ -58,11 +58,15 @@
     "mainnet" ""
     (str network ".")))
 
+(def zero-root  "0x0000000000000000000000000000000000000000000000000000000000000000")
+
 (defonce state (r/atom {:network ""
-                        :justified-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
-                        :finalized-checkpoint {:epoch 0 :root "0x0000000000000000000000000000000000000000000000000000000000000000"}
+                        :justified-checkpoint {:epoch 0 :root zero-root}
+                        :finalized-checkpoint {:epoch 0 :root zero-root}
+                        :majority-root zero-root
                         :participation-data []
-                        :deposit-contract {:balance nil}}))
+                        :deposit-contract {:balance nil}
+                        :ws-data nil}))
 
 (defn render-edn [data]
   [:pre
@@ -88,7 +92,7 @@
           {:keys [slot epoch slot-in-epoch progress-into-slot]} (:slot-clock @state)
           justified (:justified-checkpoint @state)
           finalized (:finalized-checkpoint @state)
-          head-root (get @state :majority-root "")]
+          head-root (get @state :majority-root zero-root)]
       [:div#chain-drawer.accordion
        [:div.card
         [:div.card-header
@@ -248,6 +252,23 @@
       (when balance
         [:p "Balance in deposit contract: " (.toLocaleString balance) " ETH"])]]))
 
+(defn ws-data-view []
+  (let [ws-data (@state :ws-data)
+        network (@state :network)]
+    [:div.card
+     [:div.card-header
+      "Weak subjectivity data (powered by " [:a {:href "https://github.com/adiasg/eth2-ws-provider"} "https://github.com/adiasg/eth2-ws-provider"] ")"]
+     [:div.card-body
+      (when-let [checkpoint (:checkpoint ws-data)]
+        (let [root (-> checkpoint
+                       (str/split ":")
+                       first)]
+          [:p "Current checkpoint: "
+           [:a {:href (str "https://"
+                           (network->beaconchain-prefix network)
+                           "beaconcha.in/block/"
+                           (subs root 2))} checkpoint]]))]]))
+
 (defn container-row
   "layout for a 'widget'"
   [component]
@@ -273,7 +294,10 @@
                     :href "#nav-participation"} "participation"]]
      [:li.nav-item
       [:a.nav-link {:data-toggle :tab
-                    :href "#nav-validator-info"} "validator info"]]]
+                    :href "#nav-validator-info"} "validator info"]]
+     [:li.nav-item
+      [:a.nav-link {:data-toggle :tab
+                    :href "#nav-ws-data"} "weak subjectivity"]]]
     [:div.ml-auto
      [:span.navbar-text (str "network: " (:network @state))]]]
    [:div.tab-content
@@ -293,6 +317,9 @@
     [:div#nav-validator-info.tab-pane.fade.show
      (container-row
       (validator-info-view))]
+    [:div#nav-ws-data.tab-pane.fade.show
+     (container-row
+      (ws-data-view))]
     (when debug-mode?
       (container-row
        (debug-view)))]])
@@ -473,10 +500,11 @@
 (defn refresh-fork-choice []
   (go (let [response (<! (http/get (url-with "/fork-choice")
                                    {:with-credentials? false}))
-            block-tree (get-in response [:body :block_tree])
-            total-weight (:weight block-tree)
-            fork-choice (js/d3.hierarchy (clj->js block-tree))]
-        (render-fork-choice! fork-choice total-weight))))
+            block-tree (get-in response [:body :block_tree])]
+        (when (seq (:root block-tree))
+          (let [total-weight (:weight block-tree)
+                fork-choice (js/d3.hierarchy (clj->js block-tree))]
+            (render-fork-choice! fork-choice total-weight))))))
 
 (defn block-for [ms-delay]
   (let [c (chan)]
@@ -502,7 +530,7 @@
               (fetch-block-tree-if-new-head old-root majority-root)))
         (swap! state assoc :justified-checkpoint justified)
         (swap! state assoc :finalized-checkpoint finalized)
-        (swap! state assoc :majority-root majority-root)
+        (swap! state assoc :majority-root (or majority-root zero-root))
         (swap! state assoc :heads (->> heads
                                        (map (partial attach-majority majority-root))
                                        (map attach-name))))))
@@ -554,6 +582,18 @@
   (let [timer-task (js/setInterval #(update-slot-clock (:eth2-spec @state)) slot-clock-refresh-frequency)]
     (swap! state assoc :timer-task timer-task)))
 
+(defn fetch-ws-data []
+  (go
+    (let [response (<! (http/get (url-with "/ws-data")
+                                 {:with-credentials? false}))
+          checkpoint (get-in response [:body :ws_checkpoint])]
+      (swap! state assoc :ws-data {:checkpoint "0x565a603b4b96bf0e66238e8f6cbbbad2be43df737e1289f1a9da5ad838c304df:24135"}))))
+
+(defn refresh-ws-data [{:keys [seconds_per_slot slots_per_epoch]}]
+  (let [epoch-in-seconds (* seconds_per_slot slots_per_epoch)
+        task (js/setInterval fetch-ws-data (* epoch-in-seconds 1000))]
+    (swap! state assoc :ws-data-task task)))
+
 (defn push-hash [e]
   (.pushState js/history (clj->js {}) "" (-> e .-target .-hash)))
 
@@ -577,12 +617,14 @@
       (swap! state assoc :slot-clock (compute-slot-clock spec))
       (fetch-participation-data)
       (fetch-deposit-contract-data)
+      (fetch-ws-data)
       (mount)
       (install-navigation)
       (start-slot-clock)
       (start-polling-for-heads)
       (start-polling-for-deposit-contract-data)
       (refresh-fork-choice)
+      (refresh-ws-data spec)
       (restore-last-navigation))))
 
 (defonce init

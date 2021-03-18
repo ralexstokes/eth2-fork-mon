@@ -540,9 +540,12 @@ func (m *Monitor) Start() error {
 	}()
 	go func() {
 		if m.currentForkChoiceProvider != nil {
-			log.Println("waiting for next epoch to poll for participation data")
+			log.Println("starting participation monitor")
+			err := m.fetchLatestParticipation()
+			if err != nil {
+				log.Println(err)
+			}
 			waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
-			log.Println("aligned to epoch, continuing")
 			m.startParticipationPoll()
 		}
 	}()
@@ -554,10 +557,12 @@ func (m *Monitor) Start() error {
 	}()
 	go func() {
 		if m.config.WSProviderEndpoint != "" {
-			log.Println("waiting for next epoch to poll for ws data")
-			waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
-			log.Println("aligned to epoch, continuing")
 			log.Println("starting weak subjectivity provider monitor")
+			err := m.updateWSData()
+			if err != nil {
+				log.Println(err)
+			}
+			waitUntilNextEpoch(m.config.Eth2.GenesisTime, m.config.Eth2.SecondsPerSlot, m.config.Eth2.SlotsPerEpoch)
 			m.startWSProviderMonitor()
 		}
 	}()
