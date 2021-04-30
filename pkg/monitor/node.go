@@ -67,7 +67,10 @@ func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error)
 		if err != nil {
 			return nil, err
 		}
-		version := versionData["version"].(string)
+		version, ok := versionData["version"].(string)
+		if !ok {
+			return nil, fmt.Errorf("bad version string")
+		}
 		n.version = version
 
 		n.id = idHashOf(endpoint)
