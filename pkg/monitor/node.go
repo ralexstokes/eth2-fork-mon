@@ -160,7 +160,8 @@ func (n *Node) doFetchSyncStatus() error {
 	}
 	inner, ok := syncData["data"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("no data")
+		// error message, likely pre-genesis., just don't change the last status.
+		return nil
 	}
 	if result, ok := inner["is_syncing"].(bool); ok {
 		n.isSyncing = result
