@@ -42,8 +42,8 @@ func idHashOf(peerID string) string {
 	return hex.EncodeToString(digest)[:8]
 }
 
-func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error) {
-	n := &Node{endpoint: endpoint}
+func nodeAtEndpoint(endpoint string, eth1 string, msHTTPTimeout time.Duration) (*Node, error) {
+	n := &Node{endpoint: endpoint, eth1: eth1}
 
 	// set timeout for all HTTP requests...
 	// in particular, Prysm endpoint can be slow...
@@ -178,6 +178,7 @@ func (n *Node) doFetchSyncStatus() error {
 
 type Node struct {
 	id       string
+	eth1     string
 	endpoint string
 	version  string
 
@@ -189,7 +190,7 @@ type Node struct {
 }
 
 func (n *Node) String() string {
-	return fmt.Sprintf("[healthy: %t] %s at %s has head %s", n.isHealthy, n.version, n.endpoint, n.latestHead)
+	return fmt.Sprintf("[healthy: %t] %s - %s at %s has head %s", n.isHealthy, n.eth1, n.version, n.endpoint, n.latestHead)
 }
 
 func isPrysm(identifier string) bool {

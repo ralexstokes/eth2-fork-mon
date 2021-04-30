@@ -122,10 +122,12 @@
            " with root "
            [:a {:href (str "https://" network-prefix "beaconcha.in/block/" (:root finalized))} (-> finalized :root humanize-hex)]]]]]])))
 
-(defn peer-view [index {:keys [name version healthy syncing]}]
+(defn peer-view [index {:keys [name eth1 version healthy syncing]}]
   [:tr {:key index}
    [:th {:scope :row}
     name]
+   [:th {:scope :row}
+    eth1]
    [:td version]
    [:td {:style {:text-align "center"}}
     (if healthy
@@ -150,8 +152,9 @@
         [:table.table.table-hover
          [:thead
           [:tr
-           [:th {:scope :col} "Name"]
-           [:th {:scope :col} "Version"]
+           [:th {:scope :col} "Consensus"]
+           [:th {:scope :col} "Execution"]
+           [:th {:scope :col} "Eth2 Version"]
            [:th {:scope :col
                  :style {:text-align "center"}} "Healthy?"]
            [:th {:scope :col

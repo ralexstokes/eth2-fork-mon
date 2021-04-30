@@ -7,8 +7,13 @@ type Eth2Config struct {
 	Network        string `json:"network" yaml:"network"`
 }
 
+type Endpoint struct {
+	Addr string `json:"addr" yaml:"addr"`
+	Eth1 string `json:"eth1" yaml:"eth1"`
+}
+
 type Config struct {
-	Endpoints           []string
+	Endpoints           []Endpoint
 	Eth2                Eth2Config
 	OutputDir           string
 	EtherscanAPIKey     string `yaml:"etherscan_api_key"`
