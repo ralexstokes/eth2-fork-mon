@@ -124,10 +124,12 @@
            " with root "
            [:a {:href (str "https://" network-prefix "beaconcha.in/block/" (:root finalized))} (-> finalized :root humanize-hex)]]]]]])))
 
-(defn peer-view [index {:keys [name version healthy syncing]}]
+(defn peer-view [index {:keys [name eth1 version healthy syncing]}]
   [:tr {:key index}
    [:th {:scope :row}
     name]
+   [:th {:scope :row}
+    eth1]
    [:td version]
    [:td {:style {:text-align "center"}}
     (if healthy
@@ -152,8 +154,9 @@
         [:table.table.table-hover
          [:thead
           [:tr
-           [:th {:scope :col} "Name"]
-           [:th {:scope :col} "Version"]
+           [:th {:scope :col} "Consensus"]
+           [:th {:scope :col} "Execution"]
+           [:th {:scope :col} "Eth2 Version"]
            [:th {:scope :col
                  :style {:text-align "center"}} "Healthy?"]
            [:th {:scope :col
@@ -161,11 +164,13 @@
          [:tbody
           (map-indexed peer-view peers)]]]]]]))
 
-(defn head-view [network index {:keys [name slot root is-majority?]}]
+(defn head-view [network index {:keys [name eth1 slot root is-majority?]}]
   [:tr {:class (if is-majority? :table-success :table-danger)
         :key index}
    [:th {:scope :row}
     name]
+   [:th {:scope :row}
+    eth1]
    [:td [:a {:href (str "https://"
                         (network->beaconchain-prefix network)
                         "beaconcha.in/block/"
@@ -185,7 +190,8 @@
         [:table.table.table-hover
          [:thead
           [:tr
-           [:th {:scope :col} "Name"]
+           [:th {:scope :col} "Consensus"]
+           [:th {:scope :col} "Execution"]
            [:th {:scope :col} "Slot"]
            [:th {:scope :col} "Root"]]]
          [:tbody

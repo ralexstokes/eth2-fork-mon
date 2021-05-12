@@ -42,8 +42,8 @@ func idHashOf(peerID string) string {
 	return hex.EncodeToString(digest)[:8]
 }
 
-func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error) {
-	n := &Node{endpoint: endpoint}
+func nodeAtEndpoint(endpoint string, eth1 string, msHTTPTimeout time.Duration) (*Node, error) {
+	n := &Node{endpoint: endpoint, eth1: eth1}
 
 	// set timeout for all HTTP requests...
 	// in particular, Prysm endpoint can be slow...
@@ -67,7 +67,10 @@ func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error)
 		if err != nil {
 			return nil, err
 		}
-		version := versionData["version"].(string)
+		version, ok := versionData["version"].(string)
+		if !ok {
+			return nil, fmt.Errorf("bad version string")
+		}
 		n.version = version
 
 		n.id = idHashOf(endpoint)
@@ -111,8 +114,14 @@ func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error)
 	if err != nil {
 		return nil, err
 	}
-	inner := clientResp["data"].(map[string]interface{})
-	version := inner["version"].(string)
+	inner, ok := clientResp["data"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("data not a map or missing")
+	}
+	version, ok := inner["version"].(string)
+	if !ok {
+		return nil, fmt.Errorf("version not a string")
+	}
 	n.version = version
 
 	identityResp, err := n.client.Get(endpoint + nodeIdentityPath)
@@ -126,7 +135,10 @@ func nodeAtEndpoint(endpoint string, msHTTPTimeout time.Duration) (*Node, error)
 	if err != nil {
 		return nil, err
 	}
-	inner = identityData["data"].(map[string]interface{})
+	inner, ok = identityData["data"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("data not a map or missing")
+	}
 	peerID := inner["peer_id"].(string)
 	n.id = idHashOf(peerID)
 
@@ -146,7 +158,11 @@ func (n *Node) doFetchSyncStatus() error {
 	if err != nil {
 		return err
 	}
-	inner := syncData["data"].(map[string]interface{})
+	inner, ok := syncData["data"].(map[string]interface{})
+	if !ok {
+		// error message, likely pre-genesis., just don't change the last status.
+		return nil
+	}
 	if result, ok := inner["is_syncing"].(bool); ok {
 		n.isSyncing = result
 		return nil
@@ -162,6 +178,7 @@ func (n *Node) doFetchSyncStatus() error {
 
 type Node struct {
 	id       string
+	eth1     string
 	endpoint string
 	version  string
 
@@ -173,7 +190,7 @@ type Node struct {
 }
 
 func (n *Node) String() string {
-	return fmt.Sprintf("[healthy: %t] %s at %s has head %s", n.isHealthy, n.version, n.endpoint, n.latestHead)
+	return fmt.Sprintf("[healthy: %t] %s - %s at %s has head %s", n.isHealthy, n.eth1, n.version, n.endpoint, n.latestHead)
 }
 
 func isPrysm(identifier string) bool {
@@ -308,7 +325,10 @@ func (n *Node) doFetchLatestHead() error {
 		return err
 	}
 
-	respData := headerResp["data"].(map[string]interface{})
+	respData, ok := headerResp["data"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("data not a map or missing")
+	}
 	root := respData["root"].(string)
 
 	if root == n.latestHead.root {
@@ -369,7 +389,11 @@ func (n *Node) fetchFinalityCheckpoints() (justified Checkpoint, finalized Check
 		return
 	}
 
-	finalityData := data["data"].(map[string]interface{})
+	finalityData, ok := data["data"].(map[string]interface{})
+	if !ok {
+		err = fmt.Errorf("data not a map or missing")
+		return
+	}
 	justifiedData := finalityData["current_justified"].(map[string]interface{})
 	justified.Epoch = justifiedData["epoch"].(string)
 	justified.Root = justifiedData["root"].(string)
