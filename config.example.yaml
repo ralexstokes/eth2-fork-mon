@@ -1,0 +1,10 @@
+endpoints:
+ - http://beacon-node:port
+http_timeout_milliseconds: 0
+etherscan_api_key: some-etherscan-api-key
+weak_subjectivity_provider_endpoint: http://eth2-ws-provider_eth2_ws_server_1:80
+eth2:
+ network: mainnet
+ seconds_per_slot: 12
+ genesis_time: 1606824023
+ slots_per_epoch: 32
