@@ -178,6 +178,7 @@ func (m *Monitor) sendSpec(w http.ResponseWriter, r *http.Request) {
 
 type nodeResp struct {
 	ID      string `json:"id"`
+	Eth1    string `json:"eth1"`
 	Version string `json:"version"`
 	Slot    string `json:"slot"`
 	Root    string `json:"root"`
@@ -196,6 +197,7 @@ func (m *Monitor) sendMonitorState(w http.ResponseWriter, r *http.Request) {
 	for _, node := range m.nodes {
 		response := nodeResp{
 			ID:      node.id,
+			Eth1:    node.eth1,
 			Version: node.version,
 			Slot:    node.latestHead.slot,
 			Root:    node.latestHead.root,
@@ -579,7 +581,7 @@ func FromConfig(config *Config) *Monitor {
 	var forkChoiceProvider *Node
 	var participationProvider *Node
 	for _, endpoint := range config.Endpoints {
-		node, err := nodeAtEndpoint(endpoint, time.Duration(config.MillisecondsTimeout))
+		node, err := nodeAtEndpoint(endpoint.Addr, endpoint.Eth1, time.Duration(config.MillisecondsTimeout))
 		if err != nil {
 			log.Println(err)
 			continue
