@@ -1,6 +1,6 @@
 build-prod:
 	cd client
-	clojure -m figwheel.main -O simple -bo prod
+	clojure -M figwheel.main -O simple -bo prod
 	cd -
 copy-prod:
 	mkdir -p public/cljs-out

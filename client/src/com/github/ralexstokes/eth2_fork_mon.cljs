@@ -14,6 +14,8 @@
 (def debug-mode? false)
 (def polling-frequency 700) ;; ms
 (def slot-clock-refresh-frequency 100) ;; ms
+(def good-emoji "🟢")
+(def bad-emoji "🔴")
 
 (defn url-with [path]
   (if DEV-MODE
@@ -129,8 +131,8 @@
    [:td version]
    [:td {:style {:text-align "center"}}
     (if healthy
-      "🟢"
-      "🔴")]
+      good-emoji
+      bad-emoji)]
    [:td {:style {:text-align "center"}}
     (if syncing
       "Yes"
@@ -260,14 +262,13 @@
       "Weak subjectivity data (powered by " [:a {:href "https://github.com/adiasg/eth2-ws-provider"} "https://github.com/adiasg/eth2-ws-provider"] ")"]
      [:div.card-body
       (when-let [checkpoint (:checkpoint ws-data)]
-        (let [root (-> checkpoint
-                       (str/split ":")
-                       first)]
-          [:p "Current checkpoint: "
-           [:a {:href (str "https://"
-                           (network->beaconchain-prefix network)
-                           "beaconcha.in/block/"
-                           (subs root 2))} checkpoint]]))]]))
+        (let [root (-> checkpoint (str/split ":") first)
+              stale? (:stale? ws-data)]
+          [:div
+          [:p "Latest checkpoint: " [:a {:href (str "https://" (network->beaconchain-prefix network)
+                                              "beaconcha.in/block/"
+                                              (subs root 2))} checkpoint]]
+          [:p "Safe? (only use the checkpoint if safe!) " (if stale? bad-emoji good-emoji)]]))]]))
 
 (defn container-row
   "layout for a 'widget'"
@@ -586,8 +587,11 @@
   (go
     (let [response (<! (http/get (url-with "/ws-data")
                                  {:with-credentials? false}))
-          checkpoint (get-in response [:body :ws_checkpoint])]
-      (swap! state assoc :ws-data {:checkpoint checkpoint}))))
+          checkpoint (get-in response [:body :ws_checkpoint])
+          stale? (get-in response [:body :is_safe])
+          stale? false
+          checkpoint "0x72c6cc7b697bee47458f8f9a3d90123e48e20b80c172e832ba9f4b8370548645:24333"]
+      (swap! state assoc :ws-data {:checkpoint checkpoint :stale? stale?}))))
 
 (defn refresh-ws-data [{:keys [seconds_per_slot slots_per_epoch]}]
   (let [epoch-in-seconds (* seconds_per_slot slots_per_epoch)
