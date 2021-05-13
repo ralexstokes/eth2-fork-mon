@@ -100,7 +100,10 @@ func nodeAtEndpoint(endpoint string, eth1 string, msHTTPTimeout time.Duration) (
 		if err != nil {
 			return nil, err
 		}
-		version := data["result"].(string)
+		version, ok := data["result"].(string)
+		if !ok {
+			return nil, fmt.Errorf("bad version string")
+		}
 		n.version = version
 
 		n.id = idHashOf(endpoint)
@@ -139,7 +142,10 @@ func nodeAtEndpoint(endpoint string, eth1 string, msHTTPTimeout time.Duration) (
 	if !ok {
 		return nil, fmt.Errorf("data not a map or missing")
 	}
-	peerID := inner["peer_id"].(string)
+	peerID, ok := inner["peer_id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("peer id not a string")
+	}
 	n.id = idHashOf(peerID)
 
 	err = n.doFetchSyncStatus()
@@ -167,7 +173,10 @@ func (n *Node) doFetchSyncStatus() error {
 		n.isSyncing = result
 		return nil
 	}
-	syncDistanceStr := inner["sync_distance"].(string)
+	syncDistanceStr, ok := inner["sync_distance"].(string)
+	if !ok {
+		return fmt.Errorf("sync distance not a string")
+	}
 	syncDistance, err := strconv.Atoi(syncDistanceStr)
 	if err != nil {
 		return err
@@ -224,7 +233,12 @@ func (n *Node) doFetchLatestHeadPrysm() error {
 		return err
 	}
 
-	root, err := decodePrysmRoot(data["headBlockRoot"].(string))
+	headBlockRoot, ok := data["headBlockRoot"].(string)
+	if !ok {
+		return fmt.Errorf("head block root is not a string")
+	}
+
+	root, err := decodePrysmRoot(headBlockRoot)
 	if err != nil {
 		return err
 	}
@@ -235,7 +249,10 @@ func (n *Node) doFetchLatestHeadPrysm() error {
 		return nil
 	}
 
-	slot := data["headSlot"].(string)
+	slot, ok := data["headSlot"].(string)
+	if !ok {
+		return fmt.Errorf("head slot is not a string")
+	}
 
 	// This API can be slow, so if we get an old response,
 	// just drop it
@@ -280,14 +297,24 @@ func (n *Node) doFetchLatestHeadNimbus() error {
 		return err
 	}
 
-	resultData := data["result"].(map[string]interface{})
-	root := resultData["head_block_root"].(string)
+	resultData, ok := data["result"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("data is not a map")
+	}
+	root, ok := resultData["head_block_root"].(string)
+	if !ok {
+		return fmt.Errorf("head block root is not a string")
+	}
 	root = "0x" + root
 	if root == n.latestHead.root {
 		return nil
 	}
 
-	slotNumerical := int(resultData["head_slot"].(float64))
+	slotNumericalFloat, ok := resultData["head_slot"].(float64)
+	if !ok {
+		return fmt.Errorf("head slot is not a JSON number")
+	}
+	slotNumerical := int(slotNumericalFloat)
 	slot := fmt.Sprintf("%d", slotNumerical)
 
 	n.latestHead = HeadRef{slot, root}
@@ -329,15 +356,28 @@ func (n *Node) doFetchLatestHead() error {
 	if !ok {
 		return fmt.Errorf("data not a map or missing")
 	}
-	root := respData["root"].(string)
+	root, ok := respData["root"].(string)
+	if !ok {
+		return fmt.Errorf("root is not a string")
+	}
 
 	if root == n.latestHead.root {
 		return nil
 	}
 
-	signedHeader := respData["header"].(map[string]interface{})
-	header := signedHeader["message"].(map[string]interface{})
+	signedHeader, ok := respData["header"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("header is not a map of data")
+	}
+
+	header, ok := signedHeader["message"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("inner header message is not a map of data")
+	}
 	slot := header["slot"].(string)
+	if !ok {
+		return fmt.Errorf("slot is not a string")
+	}
 
 	n.latestHead = HeadRef{slot, root}
 	return nil
@@ -394,12 +434,36 @@ func (n *Node) fetchFinalityCheckpoints() (justified Checkpoint, finalized Check
 		err = fmt.Errorf("data not a map or missing")
 		return
 	}
-	justifiedData := finalityData["current_justified"].(map[string]interface{})
-	justified.Epoch = justifiedData["epoch"].(string)
-	justified.Root = justifiedData["root"].(string)
-	finalizedData := finalityData["finalized"].(map[string]interface{})
-	finalized.Epoch = finalizedData["epoch"].(string)
-	finalized.Root = finalizedData["root"].(string)
+	justifiedData, ok := finalityData["current_justified"].(map[string]interface{})
+	if !ok {
+		err = fmt.Errorf("current justified not a map or missing")
+		return
+	}
+	justified.Epoch, ok = justifiedData["epoch"].(string)
+	if !ok {
+		err = fmt.Errorf("current justified epoch not a string")
+		return
+	}
+	justified.Root, ok = justifiedData["root"].(string)
+	if !ok {
+		err = fmt.Errorf("current justified root not a string")
+		return
+	}
+	finalizedData, ok := finalityData["finalized"].(map[string]interface{})
+	if !ok {
+		err = fmt.Errorf("finalized data not a map or missing")
+		return
+	}
+	finalized.Epoch, ok = finalizedData["epoch"].(string)
+	if !ok {
+		err = fmt.Errorf("finalized epoch not a string")
+		return
+	}
+	finalized.Root, ok = finalizedData["root"].(string)
+	if !ok {
+		err = fmt.Errorf("finalized root not a string")
+		return
+	}
 	return
 }
 
@@ -423,14 +487,46 @@ func (n *Node) doFetchParticipation(epoch int) (current Participation, previous 
 		return
 	}
 
-	participationData := data["data"].(map[string]interface{})
-	currentEpochActiveGwei := participationData["current_epoch_active_gwei"].(float64)
-	previousEpochActiveGwei := participationData["previous_epoch_active_gwei"].(float64)
-	currentEpochAttestingGwei := participationData["current_epoch_attesting_gwei"].(float64)
-	currentEpochTargetAttestingGwei := participationData["current_epoch_target_attesting_gwei"].(float64)
-	previousEpochAttestingGwei := participationData["previous_epoch_attesting_gwei"].(float64)
-	previousEpochTargetAttestingGwei := participationData["previous_epoch_target_attesting_gwei"].(float64)
-	previousEpochHeadAttestingGwei := participationData["previous_epoch_head_attesting_gwei"].(float64)
+	participationData, ok := data["data"].(map[string]interface{})
+	if !ok {
+		err = fmt.Errorf("participation data not a map or missing")
+		return
+	}
+	currentEpochActiveGwei, ok := participationData["current_epoch_active_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
+	previousEpochActiveGwei, ok := participationData["previous_epoch_active_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
+	currentEpochAttestingGwei, ok := participationData["current_epoch_attesting_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
+	currentEpochTargetAttestingGwei, ok := participationData["current_epoch_target_attesting_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
+	previousEpochAttestingGwei, ok := participationData["previous_epoch_attesting_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
+	previousEpochTargetAttestingGwei, ok := participationData["previous_epoch_target_attesting_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
+	previousEpochHeadAttestingGwei, ok := participationData["previous_epoch_head_attesting_gwei"].(float64)
+	if !ok {
+		err = fmt.Errorf("wrong type for participation data")
+		return
+	}
 
 	current.Epoch = epoch
 	current.ParticipationRate = currentEpochAttestingGwei / currentEpochActiveGwei * 100
