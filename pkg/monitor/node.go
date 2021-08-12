@@ -54,61 +54,61 @@ func nodeAtEndpoint(endpoint string, eth1 string, msHTTPTimeout time.Duration) (
 		return nil, err
 	}
 
-	if resp.StatusCode == http.StatusNotFound {
-		// prysm
-		versionResp, err := n.client.Get(endpoint + "/eth/v1alpha1/node/version")
-		if err != nil {
-			return nil, err
-		}
-		defer versionResp.Body.Close()
-		versionData := make(map[string]interface{})
-		dec := json.NewDecoder(versionResp.Body)
-		err = dec.Decode(&versionData)
-		if err != nil {
-			return nil, err
-		}
-		version, ok := versionData["version"].(string)
-		if !ok {
-			return nil, fmt.Errorf("bad version string")
-		}
-		n.version = version
+	// if resp.StatusCode == http.StatusNotFound {
+	// 	// prysm
+	// 	versionResp, err := n.client.Get(endpoint + "/eth/v1alpha1/node/version")
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	defer versionResp.Body.Close()
+	// 	versionData := make(map[string]interface{})
+	// 	dec := json.NewDecoder(versionResp.Body)
+	// 	err = dec.Decode(&versionData)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	version, ok := versionData["version"].(string)
+	// 	if !ok {
+	// 		return nil, fmt.Errorf("bad version string")
+	// 	}
+	// 	n.version = version
 
-		n.id = idHashOf(endpoint)
-		return n, nil
-	} else if resp.StatusCode == http.StatusLengthRequired {
-		// nimbus
-		url := n.endpoint
+	// 	n.id = idHashOf(endpoint)
+	// 	return n, nil
+	// } else if resp.StatusCode == http.StatusLengthRequired {
+	// 	// nimbus
+	// 	url := n.endpoint
 
-		request, err := json.Marshal(map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      randomRPCID(),
-			"method":  "getNodeVersion",
-			"params":  []string{},
-		})
-		if err != nil {
-			return nil, err
-		}
+	// 	request, err := json.Marshal(map[string]interface{}{
+	// 		"jsonrpc": "2.0",
+	// 		"id":      randomRPCID(),
+	// 		"method":  "getNodeVersion",
+	// 		"params":  []string{},
+	// 	})
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
 
-		resp, err := n.client.Post(url, "application/json", bytes.NewBuffer(request))
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		data := make(map[string]interface{})
-		dec := json.NewDecoder(resp.Body)
-		err = dec.Decode(&data)
-		if err != nil {
-			return nil, err
-		}
-		version, ok := data["result"].(string)
-		if !ok {
-			return nil, fmt.Errorf("bad version string")
-		}
-		n.version = version
+	// 	resp, err := n.client.Post(url, "application/json", bytes.NewBuffer(request))
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	defer resp.Body.Close()
+	// 	data := make(map[string]interface{})
+	// 	dec := json.NewDecoder(resp.Body)
+	// 	err = dec.Decode(&data)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	version, ok := data["result"].(string)
+	// 	if !ok {
+	// 		return nil, fmt.Errorf("bad version string")
+	// 	}
+	// 	n.version = version
 
-		n.id = idHashOf(endpoint)
-		return n, nil
-	}
+	// 	n.id = idHashOf(endpoint)
+	// 	return n, nil
+	// }
 
 	defer resp.Body.Close()
 	clientResp := make(map[string]interface{})
@@ -333,11 +333,11 @@ func (n *Node) fetchLatestHead(wg *sync.WaitGroup) {
 }
 
 func (n *Node) doFetchLatestHead() error {
-	if isPrysm(n.version) {
-		return n.doFetchLatestHeadPrysm()
-	} else if isNimbus(n.version) {
-		return n.doFetchLatestHeadNimbus()
-	}
+	// if isPrysm(n.version) {
+	// 	return n.doFetchLatestHeadPrysm()
+	// } else if isNimbus(n.version) {
+	// 	return n.doFetchLatestHeadNimbus()
+	// }
 
 	url := n.endpoint + headHeaderPath
 	resp, err := n.client.Get(url)
