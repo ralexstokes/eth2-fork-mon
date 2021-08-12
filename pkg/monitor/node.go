@@ -333,11 +333,9 @@ func (n *Node) fetchLatestHead(wg *sync.WaitGroup) {
 }
 
 func (n *Node) doFetchLatestHead() error {
-	// if isPrysm(n.version) {
-	// 	return n.doFetchLatestHeadPrysm()
-	// } else if isNimbus(n.version) {
-	// 	return n.doFetchLatestHeadNimbus()
-	// }
+	if isPrysm(n.version) {
+		return n.doFetchLatestHeadPrysm()
+	}
 
 	url := n.endpoint + headHeaderPath
 	resp, err := n.client.Get(url)
